@@ -1,0 +1,1016 @@
+#!/usr/bin/env python3
+"""
+writer.py
+==============
+Generate and store 2-D / 3-D unstructured box meshes, optionally with
+obstacles carved out as holes.
+
+Five mesh types are supported:
+
+  triangle    Delaunay-refined triangulation        (MeshPy / Triangle)
+  tetra       Delaunay-refined tetrahedralization   (MeshPy / TetGen)
+  gridsplit   Cartesian grid split into right triangles  (no external lib)
+  equilateral Offset-row triangular lattice              (no external lib)
+  kuhn        Kuhn / Freudenthal 6-tet-per-cube          (no external lib)
+
+Usage
+-----
+    python writer.py config.yaml
+
+YAML keys
+---------
+  mesh_type   : triangle | tetra | gridsplit | equilateral | kuhn
+  box_length  : [Lx, Ly]  or  [Lx, Ly, Lz]
+  n_divisions : [nx, ny]  or  [nx, ny, nz]
+      MeshPy types   — boundary vertices per edge; interior filled automatically.
+      Structured types — number of cells per direction.
+  periodic    : [bool, bool]  or  [bool, bool, bool]
+  quality     : (MeshPy types only)
+      min_angle  : float  (Triangle, degrees, default 20)
+      max_area   : float  (Triangle; auto if omitted)
+      max_volume : float  (TetGen;   auto if omitted)
+  diagonal    : (gridsplit / kuhn only, see notes below)
+  obstacles   : (triangle / tetra only — see 'Obstacles' below)
+
+Output files
+------------
+  The .h5 and .xdmf files are written next to the config
+  file, sharing its base name. E.g. running
+      python writer.py meshes/triangle.yaml
+  writes
+      meshes/triangle.h5
+      meshes/triangle.xdmf
+
+Notes on structured types
+--------------------------
+  gridsplit
+      All triangles are congruent right triangles with legs dx and dy.
+      Setting dx == dy gives isosceles right triangles.
+      Optional 'diagonal' key selects which diagonal splits each cell:
+          backslash (default) : cut along (i+1,j)-(i,j+1), i.e. "\"
+          slash               : cut along (i,j)-(i+1,j+1),   i.e. "/"
+          alternate           : checkerboard mix of the two (still all
+                                congruent triangles, up to reflection)
+
+  equilateral
+      Even rows: nx+1 points at x = 0, dx, ..., Lx
+      Odd  rows: nx+2 points at x = 0, dx/2, ..., Lx  (boundary points added)
+      Interior triangles are equilateral when dy = dx * sqrt(3)/2, i.e.
+          Ly / ny  =  (Lx / nx) * sqrt(3)/2  ≈  0.866 * Lx/nx
+      Left/right boundary triangles are right-angle (unavoidable on a box).
+      For y-periodic meshes choose ny even so top/bottom rows are both even.
+
+  kuhn
+      Each axis-aligned cube → 6 tetrahedra via all permutations of the three
+      coordinate-step directions, walking from one cube corner to the
+      opposite corner (the cube's internal "body diagonal").
+      With dx=dy=dz=h all 6 tets per cube are congruent Sommerville type-1
+      tets (edges h,h,h,h√2,h√2,h√3). For a non-cubic box (dx≠dy≠dz) the 6
+      permutations within a single cube are NOT all congruent to each other
+      — this is inherent to the Kuhn decomposition itself, independent of
+      the 'diagonal' option below.
+
+      Optional 'diagonal' key selects which body diagonal each cube splits
+      along. A cube has 4 distinct body diagonals; all are uniformly
+      conforming choices when applied to every cube:
+          main             (default) : (0,0,0)-(1,1,1) — 'fixed' is a
+                                        backward-compatible alias for this
+          flip_x                     : (1,0,0)-(0,1,1) — main, mirrored along x
+          flip_y                     : (0,1,0)-(1,0,1) — main, mirrored along y
+          flip_z                     : (0,0,1)-(1,1,0) — main, mirrored along z
+          alternate_layers            : the diagonal's starting corner varies
+                                        independently per layer index,
+                                        (i%2, j%2, k%2) — the family (up to
+                                        relabeling) that removes a single
+                                        global diagonal direction while
+                                        remaining conforming across every
+                                        shared cube face.
+      For cubic cells (dx=dy=dz) the four fixed variants are related by the
+      cube's rotational symmetry (same local tet shapes, different global
+      grain direction); for non-cubic cells they are genuinely different
+      tet-shape families.
+
+Obstacles (triangle / tetra only)
+----------------------------------
+  Only the Delaunay-refined types support obstacles: they are implemented as
+  PSLG/PLC holes (a closed boundary loop/surface + one interior point telling
+  Triangle/TetGen "do not mesh here"). The structured types (gridsplit,
+  equilateral, kuhn) tile the box uniformly with no facility for excluding
+  regions, so 'obstacles' is rejected for those mesh_types.
+
+  obstacles: a list of dicts, each with:
+    2-D (mesh_type: triangle):
+      shape: circle
+        center: [cx, cy]
+        radius: r
+        n_segments: int (default 32)     # polygon approximation resolution
+      shape: rectangle
+        center: [cx, cy]
+        half_extents: [hx, hy]
+    3-D (mesh_type: tetra):
+      shape: sphere
+        center: [cx, cy, cz]
+        radius: r
+        subdivisions: int (default 2)    # icosphere refinement level
+      shape: box
+        center: [cx, cy, cz]
+        half_extents: [hx, hy, hz]
+
+  Each obstacle gets its own boundary marker: 10+idx for 2-D obstacles,
+  100+idx for 3-D obstacles (idx = 0-based position in the 'obstacles' list),
+  distinct from the box's own 1-4 / 1-6 face markers. Unlike the box (whose
+  6 faces get individually distinguishable markers), a single obstacle's
+  entire surface shares ONE marker — it is meant to tag "wall of obstacle
+  #idx" as a whole, not distinguish parts of it.
+
+  Sphere obstacles are polyhedral approximations (icosphere), not exact
+  spheres; increase 'subdivisions' for a smoother surface at the cost of
+  more surface triangles. There is no local mesh-size refinement near
+  obstacles (unlike Gmsh's size fields) — refinement is governed globally
+  by 'quality.max_volume' / 'max_area'.
+
+  Placement is sanity-checked with simple bounding-region heuristics
+  (printed as [warn], not hard failures): an obstacle reaching the domain
+  boundary, or two obstacles whose bounding regions appear to overlap.
+  Final geometric validity is enforced by Triangle/TetGen themselves.
+
+HDF5 layout
+-----------
+  Attributes: mesh_type, dimension, box_length, n_vertices, n_cells, n_edges
+
+  /points              float64  (n_pts,  3)     z=0 for 2-D
+  /cell_to_vertex      int64    (n_cells, d)    d=3 (tri) | 4 (tet)
+  /vertex_to_vertex    int64    (n_edges, 2)    all unique sorted edges
+  /vertex_to_cell/
+      offsets          int64    (n_pts+1,)      CSR row pointers
+      indices          int64    (Σ degree,)     CSR cell-index data
+  /boundary/
+      point_markers    int32    (n_pts,)        0=interior; see convention
+      edge_markers     int32    (n_edges,)      2-D only
+  /periodicity/
+      Attrs: periodic_x, periodic_y [, periodic_z]   bool
+      x_pairs          int64    (n, 2)          [v_lo, v_hi]
+      y_pairs / z_pairs                         idem
+  /obstacles/                                   present only if obstacles given
+      Attrs: count
+      obstacle_<idx>/  Attrs: shape, marker, center, radius | half_extents
+
+Boundary marker convention
+--------------------------
+  2-D:  1=bottom(y=0)  2=right(x=Lx)  3=top(y=Ly)  4=left(x=0)
+        10+idx = obstacle idx's surface
+  3-D:  1=xmin  2=xmax  3=ymin  4=ymax  5=zmin  6=zmax   0=interior
+        100+idx = obstacle idx's surface
+  Corner/edge vertices receive the highest-priority face marker (lowest number).
+"""
+
+import sys
+from itertools import combinations, permutations as _iperms
+from pathlib import Path
+
+import h5py
+import numpy as np
+import yaml
+
+# ── Constants ──────────────────────────────────────────────────────────────────
+_MK2  = {"bottom": 1, "right": 2, "top": 3, "left": 4}
+_MK3  = {"xmin": 1, "xmax": 2, "ymin": 3, "ymax": 4, "zmin": 5, "zmax": 6}
+_DIRS = ["x", "y", "z"]
+
+_2D_TYPES = {"triangle", "gridsplit", "equilateral"}
+_3D_TYPES = {"tetra", "kuhn"}
+_ALL_TYPES = _2D_TYPES | _3D_TYPES
+_OBSTACLE_TYPES = {"triangle", "tetra"}
+_OBSTACLE_SHAPES_2D = {"circle", "rectangle"}
+_OBSTACLE_SHAPES_3D = {"sphere", "box"}
+
+# Pre-computed Kuhn permutations (used in _build_kuhn)
+_KUHN_PERMS = list(_iperms([0, 1, 2]))   # 6 permutations of {x, y, z}
+
+
+# ── Configuration ──────────────────────────────────────────────────────────────
+
+def load_config(path: str) -> dict:
+    with open(path) as fh:
+        cfg = yaml.safe_load(fh)
+    mt = cfg.get("mesh_type", "triangle")
+    if mt not in _ALL_TYPES:
+        raise ValueError(f"mesh_type must be one of {sorted(_ALL_TYPES)}, got '{mt}'")
+    dim = 2 if mt in _2D_TYPES else 3
+    cfg.setdefault("periodic",  [False] * dim)
+    cfg.setdefault("quality",   {})
+    cfg.setdefault("obstacles", [])
+
+    for key in ("box_length", "n_divisions", "periodic"):
+        if len(cfg[key]) != dim:
+            raise ValueError(f"'{key}' needs {dim} entries for mesh_type='{mt}'")
+    return cfg
+
+
+# ── Unique-point registry (MeshPy builders only) ───────────────────────────────
+
+class _Reg:
+    _PREC = 10
+    def __init__(self): self._pts, self._idx = [], {}
+    def add(self, *c) -> int:
+        key = tuple(round(v, self._PREC) for v in c)
+        if key not in self._idx:
+            self._idx[key] = len(self._pts); self._pts.append(c)
+        return self._idx[key]
+    def array(self) -> np.ndarray:
+        return np.asarray(self._pts, dtype=np.float64)
+
+
+# ── Obstacle validation ────────────────────────────────────────────────────────
+
+def _validate_obstacles(obstacles: list, box: list, dim: int, mesh_type: str) -> None:
+    """Raise on malformed obstacle specs; print [warn] for placement heuristics."""
+    if not obstacles:
+        return
+    if mesh_type not in _OBSTACLE_TYPES:
+        raise ValueError(
+            f"'obstacles' is only supported for mesh_type in {sorted(_OBSTACLE_TYPES)} "
+            f"(structured types tile the box uniformly with no facility for "
+            f"excluding regions); got mesh_type='{mesh_type}'")
+
+    valid_shapes = _OBSTACLE_SHAPES_2D if dim == 2 else _OBSTACLE_SHAPES_3D
+    reach = []   # (center array, scalar reach) per obstacle, for overlap heuristic
+
+    for i, obs in enumerate(obstacles):
+        shape = obs.get("shape")
+        if shape not in valid_shapes:
+            raise ValueError(f"obstacle {i}: shape must be one of {sorted(valid_shapes)} "
+                             f"for a {dim}-D mesh, got '{shape}'")
+        c = obs.get("center")
+        if c is None or len(c) != dim:
+            raise ValueError(f"obstacle {i}: 'center' must have {dim} entries")
+        if shape in ("circle", "sphere"):
+            r = obs.get("radius")
+            if r is None or r <= 0:
+                raise ValueError(f"obstacle {i}: 'radius' must be a positive number")
+            half = [r] * dim
+        else:
+            he = obs.get("half_extents")
+            if he is None or len(he) != dim:
+                raise ValueError(f"obstacle {i}: 'half_extents' must have {dim} entries")
+            half = list(he)
+
+        for d in range(dim):
+            if c[d] - half[d] <= 0 or c[d] + half[d] >= box[d]:
+                print(f"  [warn] obstacle {i}: extends to/past the domain boundary "
+                      f"along axis {_DIRS[d]}")
+        reach.append((np.array(c, dtype=float), max(half)))
+
+    for i in range(len(reach)):
+        for j in range(i + 1, len(reach)):
+            ci, hi = reach[i]; cj, hj = reach[j]
+            if np.linalg.norm(ci - cj) < (hi + hj):
+                print(f"  [warn] obstacles {i} and {j}: bounding regions appear to "
+                      f"overlap — check placement")
+
+
+# ── Obstacle geometry helpers ──────────────────────────────────────────────────
+
+def _circle_points(cx, cy, r, n):
+    """n points evenly spaced around a circle of radius r centered at (cx,cy)."""
+    ang = np.linspace(0., 2*np.pi, n, endpoint=False)
+    return [(cx + r*np.cos(a), cy + r*np.sin(a)) for a in ang]
+
+
+def _rectangle_points(cx, cy, hx, hy):
+    """4 corners of an axis-aligned rectangle, CCW, centered at (cx,cy)."""
+    return [(cx-hx, cy-hy), (cx+hx, cy-hy), (cx+hx, cy+hy), (cx-hx, cy+hy)]
+
+
+def _icosphere(cx, cy, cz, r, subdivisions=2):
+    """
+    Closed, watertight triangulated sphere via recursive icosahedron
+    subdivision (outward-pointing normals, i.e. away from the center).
+
+    Returns (vertices (n,3), faces (m,3) local indices, surf_tol).
+    surf_tol is the max deviation of a flat facet from the true sphere —
+    needed because Steiner points TetGen inserts on this polyhedral
+    surface satisfy dist(center) ∈ [r - surf_tol, r], not exactly r.
+    """
+    t = (1.0 + np.sqrt(5.0)) / 2.0
+    base = [
+        (-1,  t,  0), ( 1,  t,  0), (-1, -t,  0), ( 1, -t,  0),
+        ( 0, -1,  t), ( 0,  1,  t), ( 0, -1, -t), ( 0,  1, -t),
+        ( t,  0, -1), ( t,  0,  1), (-t,  0, -1), (-t,  0,  1),
+    ]
+    vlist = [np.array(v, dtype=np.float64) for v in base]
+    for i in range(len(vlist)):
+        vlist[i] = vlist[i] / np.linalg.norm(vlist[i])
+
+    faces = [
+        (0,11,5), (0,5,1), (0,1,7), (0,7,10), (0,10,11),
+        (1,5,9), (5,11,4), (11,10,2), (10,7,6), (7,1,8),
+        (3,9,4), (3,4,2), (3,2,6), (3,6,8), (3,8,9),
+        (4,9,5), (2,4,11), (6,2,10), (8,6,7), (9,8,1),
+    ]
+
+    for _ in range(subdivisions):
+        midcache = {}
+        def midpoint(i1, i2):
+            key = (min(i1, i2), max(i1, i2))
+            if key in midcache:
+                return midcache[key]
+            m = (vlist[i1] + vlist[i2]) / 2.0
+            m = m / np.linalg.norm(m)
+            vlist.append(m)
+            midcache[key] = len(vlist) - 1
+            return midcache[key]
+
+        new_faces = []
+        for a, b, c in faces:
+            ab, bc, ca = midpoint(a, b), midpoint(b, c), midpoint(c, a)
+            new_faces += [(a, ab, ca), (b, bc, ab), (c, ca, bc), (ab, bc, ca)]
+        faces = new_faces
+
+    verts_unit = np.array(vlist, dtype=np.float64)
+    centroids  = verts_unit[np.array(faces)].mean(axis=1)
+    surf_tol_unit = 1.0 - float(np.min(np.linalg.norm(centroids, axis=1)))
+
+    verts = verts_unit * r + np.array([cx, cy, cz])
+    return verts, np.array(faces, dtype=np.int64), surf_tol_unit * r
+
+
+def _box_obstacle_surface(reg, cx, cy, cz, hx, hy, hz, marker):
+    """Closed axis-aligned box surface (12 triangles, outward normals)."""
+    x0, x1 = cx-hx, cx+hx
+    y0, y1 = cy-hy, cy+hy
+    z0, z1 = cz-hz, cz+hz
+    facets, fmk = [], []
+    def quad(a, b, c, d):
+        facets.append([a, b, c]); facets.append([a, c, d]); fmk.extend([marker, marker])
+    quad(reg.add(x0,y0,z0), reg.add(x0,y0,z1), reg.add(x0,y1,z1), reg.add(x0,y1,z0))  # xmin
+    quad(reg.add(x1,y0,z0), reg.add(x1,y1,z0), reg.add(x1,y1,z1), reg.add(x1,y0,z1))  # xmax
+    quad(reg.add(x0,y0,z0), reg.add(x1,y0,z0), reg.add(x1,y0,z1), reg.add(x0,y0,z1))  # ymin
+    quad(reg.add(x0,y1,z0), reg.add(x0,y1,z1), reg.add(x1,y1,z1), reg.add(x1,y1,z0))  # ymax
+    quad(reg.add(x0,y0,z0), reg.add(x0,y1,z0), reg.add(x1,y1,z0), reg.add(x1,y0,z0))  # zmin
+    quad(reg.add(x0,y0,z1), reg.add(x1,y0,z1), reg.add(x1,y1,z1), reg.add(x0,y1,z1))  # zmax
+    return facets, fmk
+
+
+# ── MeshPy-based builders ──────────────────────────────────────────────────────
+
+def _build_2d(cfg: dict):
+    """Delaunay-refined triangulation via Triangle / MeshPy, optionally with
+    circular/rectangular obstacles carved out as holes (see 'obstacles' key)."""
+    import meshpy.triangle as triangle
+
+    Lx, Ly = cfg["box_length"]; nx, ny = cfg["n_divisions"]; q = cfg["quality"]
+    obstacles = cfg.get("obstacles", [])
+    dx, dy  = Lx / max(nx-1, 1), Ly / max(ny-1, 1)
+    max_area = q.get("max_area") or (0.5 * dx * dy)
+    min_ang  = q.get("min_angle", 20.0)
+    reg = _Reg()
+    xv, yv = np.linspace(0., Lx, nx), np.linspace(0., Ly, ny)
+    segs, smk = [], []
+
+    def strip(seq, mk):
+        for a, b in zip(seq[:-1], seq[1:]): segs.append((a, b)); smk.append(mk)
+
+    def ring(seq, mk):
+        for a, b in zip(seq, seq[1:] + seq[:1]): segs.append((a, b)); smk.append(mk)
+
+    strip([reg.add(x, 0.) for x in xv],        _MK2["bottom"])
+    strip([reg.add(Lx, y) for y in yv],         _MK2["right"])
+    strip([reg.add(x, Ly) for x in xv[::-1]],  _MK2["top"])
+    strip([reg.add(0., y) for y in yv[::-1]],  _MK2["left"])
+
+    holes = []
+    obstacle_meta = []
+    for idx, obs in enumerate(obstacles):
+        marker = 10 + idx
+        shape  = obs["shape"]
+        cx, cy = obs["center"]
+        if shape == "circle":
+            r = obs["radius"]; n = obs.get("n_segments", 32)
+            pts_ring = [reg.add(x, y) for x, y in _circle_points(cx, cy, r, n)]
+        else:   # rectangle
+            hx, hy = obs["half_extents"]
+            pts_ring = [reg.add(x, y) for x, y in _rectangle_points(cx, cy, hx, hy)]
+        ring(pts_ring, marker)
+        holes.append((cx, cy))
+        obstacle_meta.append({**obs, "marker": marker})
+
+    info = triangle.MeshInfo()
+    info.set_points(reg.array().tolist())
+    info.set_facets(segs, facet_markers=smk)
+    if holes:
+        info.set_holes(holes)
+
+    # MeshPy ≥ 2024 renamed generate_edges → generate_faces
+    # and mesh.edges / mesh.edge_markers → mesh.faces / mesh.face_markers.
+    # The try/except keeps the script working on both old and new installs.
+    try:
+        mesh    = triangle.build(info, max_volume=max_area, min_angle=min_ang,
+                                 generate_faces=True)
+        edges   = np.asarray(mesh.faces,        dtype=np.int64)
+        edge_mk = np.asarray(mesh.face_markers, dtype=np.int32)
+    except TypeError:           # older MeshPy: generate_faces not recognised
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            mesh = triangle.build(info, max_volume=max_area, min_angle=min_ang,
+                                  generate_edges=True)
+        edges   = np.asarray(mesh.edges,        dtype=np.int64)
+        edge_mk = np.asarray(mesh.edge_markers, dtype=np.int32)
+
+    return (np.asarray(mesh.points,        dtype=np.float64),
+            np.asarray(mesh.elements,      dtype=np.int64),
+            edges, np.asarray(mesh.point_markers, dtype=np.int32), edge_mk,
+            obstacle_meta)
+
+
+def _build_3d(cfg: dict):
+    """Delaunay-refined tetrahedralization via TetGen / MeshPy, optionally with
+    spherical/box obstacles carved out as holes (see 'obstacles' key)."""
+    import meshpy.tet as tet
+
+    Lx, Ly, Lz = cfg["box_length"]; nx, ny, nz = cfg["n_divisions"]; q = cfg["quality"]
+    obstacles = cfg.get("obstacles", [])
+    dx = Lx/max(nx-1,1); dy = Ly/max(ny-1,1); dz = Lz/max(nz-1,1)
+    max_vol = q.get("max_volume") or (dx*dy*dz/6.)
+    reg = _Reg()
+    xv = np.linspace(0., Lx, nx); yv = np.linspace(0., Ly, ny); zv = np.linspace(0., Lz, nz)
+    facets, fmk = [], []
+    def quad(a, b, c, d, mk):
+        # New pybind11 MeshPy: each facet is a flat vertex list, not [[v0,v1,v2]]
+        facets.append([a,b,c]); facets.append([a,c,d]); fmk.extend([mk, mk])
+    for j in range(ny-1):
+        for k in range(nz-1):
+            y0,y1,z0,z1 = yv[j],yv[j+1],zv[k],zv[k+1]
+            quad(reg.add(0.,y0,z0),reg.add(0.,y0,z1),reg.add(0.,y1,z1),reg.add(0.,y1,z0),_MK3["xmin"])
+            quad(reg.add(Lx,y0,z0),reg.add(Lx,y1,z0),reg.add(Lx,y1,z1),reg.add(Lx,y0,z1),_MK3["xmax"])
+    for i in range(nx-1):
+        for k in range(nz-1):
+            x0,x1,z0,z1 = xv[i],xv[i+1],zv[k],zv[k+1]
+            quad(reg.add(x0,0.,z0),reg.add(x1,0.,z0),reg.add(x1,0.,z1),reg.add(x0,0.,z1),_MK3["ymin"])
+            quad(reg.add(x0,Ly,z0),reg.add(x0,Ly,z1),reg.add(x1,Ly,z1),reg.add(x1,Ly,z0),_MK3["ymax"])
+    for i in range(nx-1):
+        for j in range(ny-1):
+            x0,x1,y0,y1 = xv[i],xv[i+1],yv[j],yv[j+1]
+            quad(reg.add(x0,y0,0.),reg.add(x0,y1,0.),reg.add(x1,y1,0.),reg.add(x1,y0,0.),_MK3["zmin"])
+            quad(reg.add(x0,y0,Lz),reg.add(x1,y0,Lz),reg.add(x1,y1,Lz),reg.add(x0,y1,Lz),_MK3["zmax"])
+
+    # ── Obstacles: closed surfaces carved out as TetGen holes ──────────────
+    holes = []
+    obstacle_meta = []      # kept for the point-marker fallback below
+    for idx, obs in enumerate(obstacles):
+        marker = 100 + idx
+        shape  = obs["shape"]
+        cx, cy, cz = obs["center"]
+        if shape == "sphere":
+            r = obs["radius"]; subdiv = obs.get("subdivisions", 2)
+            verts, faces, sagitta = _icosphere(cx, cy, cz, r, subdiv)
+            idx_map = [reg.add(*v) for v in verts]
+            for a, b, c in faces:
+                facets.append([idx_map[a], idx_map[b], idx_map[c]]); fmk.append(marker)
+            obstacle_meta.append({**obs, "marker": marker, "surf_tol": max(sagitta, 1e-9)})
+        else:   # box
+            hx, hy, hz = obs["half_extents"]
+            ob_facets, ob_fmk = _box_obstacle_surface(reg, cx, cy, cz, hx, hy, hz, marker)
+            facets += ob_facets; fmk += ob_fmk
+            obstacle_meta.append({**obs, "marker": marker})
+        holes.append((cx, cy, cz))
+
+    info = tet.MeshInfo()
+    info.set_points(reg.array().tolist()); info.set_facets(facets, markers=fmk)
+    if holes:
+        info.set_holes(holes)
+
+    mesh = tet.build(info, options=tet.Options("pqe"), max_volume=max_vol)
+    pts   = np.asarray(mesh.points,        dtype=np.float64)
+    cells = np.asarray(mesh.elements,      dtype=np.int64)
+
+    # Try TetGen's native point_markers first (cheap: no extra pass over pts).
+    # Known failure mode: with no obstacles it can come back entirely
+    # unallocated. Defensively also check the *values* are all within the
+    # set of markers we actually assigned to input facets (0 = interior,
+    # 1-6 = box faces, obstacle markers) — if TetGen ever produced stray
+    # values outside that set we fall back rather than trust them silently.
+    valid_markers = {0, 1, 2, 3, 4, 5, 6} | {obs["marker"] for obs in obstacle_meta}
+    try:
+        pt_mk = np.asarray(mesh.point_markers, dtype=np.int32)
+        if pt_mk.size == 0 or not np.all(np.isin(pt_mk, list(valid_markers))):
+            raise RuntimeError("unallocated or contains values outside the "
+                               "expected marker set")
+    except RuntimeError as exc:
+        print(f"  [info] TetGen point_markers {exc}; deriving from coordinates")
+        pt_mk = _pt_markers_3d(pts, Lx, Ly, Lz, obstacle_meta)
+
+    try:
+        edges = np.asarray(mesh.edges, dtype=np.int64)
+        if edges.ndim != 2 or edges.shape[1] != 2 or len(edges) == 0: raise ValueError
+    except (AttributeError, ValueError) as exc:
+        print(f"  [info] TetGen edge output unavailable ({exc}); deriving from cells")
+        edges = _edges_from_cells(cells)
+
+    return pts, cells, edges, pt_mk, obstacle_meta
+
+
+# ── Structured builders ────────────────────────────────────────────────────────
+
+def _build_gridsplit(cfg: dict):
+    """
+    Cartesian (nx+1)×(ny+1) grid, each rectangle split into two triangles.
+    Produces 2·nx·ny congruent right triangles with legs dx=Lx/nx, dy=Ly/ny
+    (congruent up to reflection when diagonal='alternate').
+
+    diagonal:
+        'backslash' (default) — split along (i+1,j)-(i,j+1)   "\\"
+        'slash'                — split along (i,j)-(i+1,j+1)   "/"
+        'alternate'            — checkerboard mix of the two, i.e. the
+                                  diagonal direction flips on alternating
+                                  cells (i+j odd vs even). This removes the
+                                  directional bias a single fixed diagonal
+                                  introduces (e.g. for isotropic-looking
+                                  gradients), while every triangle is still
+                                  congruent to every other up to reflection.
+    """
+    Lx, Ly = cfg["box_length"]; nx, ny = cfg["n_divisions"]
+    diagonal = cfg.get("diagonal", "backslash")
+    valid = {"backslash", "slash", "alternate"}
+    if diagonal not in valid:
+        raise ValueError(f"'diagonal' must be one of {sorted(valid)}, got '{diagonal}'")
+
+    xs = np.linspace(0., Lx, nx+1); ys = np.linspace(0., Ly, ny+1)
+    XX, YY = np.meshgrid(xs, ys)
+    pts = np.column_stack([XX.ravel(), YY.ravel()])   # row-major: j*(nx+1)+i
+
+    def vid(i, j): return j*(nx+1)+i
+
+    cells = []
+    for j in range(ny):
+        for i in range(nx):
+            bl, br, tr, tl = vid(i,j), vid(i+1,j), vid(i+1,j+1), vid(i,j+1)
+            use_backslash = (diagonal == "backslash" or
+                             (diagonal == "alternate" and (i + j) % 2 == 0))
+            if use_backslash:               # diagonal br-tl  "\"
+                cells.append([bl, br, tl])
+                cells.append([br, tr, tl])
+            else:                            # diagonal bl-tr  "/"
+                cells.append([bl, br, tr])
+                cells.append([bl, tr, tl])
+
+    return pts, np.array(cells, dtype=np.int64)
+
+
+def _build_equilateral(cfg: dict):
+    """
+    Offset-row triangular lattice on [0,Lx]×[0,Ly].
+
+    Row layout
+    ----------
+      Even rows (j=0,2,…):  nx+1 points at x = 0, dx, …, Lx
+      Odd  rows (j=1,3,…):  nx+2 points at x = 0, dx/2, …, Lx-dx/2, Lx
+        (x=0 and x=Lx are added as boundary anchors)
+
+    Triangle count per strip:  2·nx+1  (nx interior + nx-1 interior + 2 boundary)
+    Total triangles:  ny·(2·nx+1)
+
+    Equilateral condition
+    ---------------------
+      Interior triangles are equilateral when dy = dx·√3/2.
+      Left/right boundary triangles are right-angle (unavoidable on a box).
+      For y-periodic meshes choose ny even (both bounding rows are even-type).
+    """
+    Lx, Ly = cfg["box_length"]; nx, ny = cfg["n_divisions"]
+    dx, dy = Lx/nx, Ly/ny
+    dy_eq  = dx*np.sqrt(3)/2
+    if abs(dy - dy_eq)/dy_eq > 0.02:
+        print(f"  [info] equilateral: interior tris equilateral at "
+              f"dy={dy_eq:.5f} (Ly/ny={dy:.5f}, {100*(dy/dy_eq-1):+.1f}%)\n"
+              f"         Suggestion: set Ly = {nx*dy_eq*ny/nx:.5f} or ny = "
+              f"{max(1,round(Ly/dy_eq))}")
+    if ny % 2 and cfg.get("periodic", [False,False])[1]:
+        print("  [warn] equilateral: ny is odd; top row is odd-type — "
+              "y-periodic pairing may be incomplete")
+
+    pts = []; row_start = []
+    for j in range(ny+1):
+        row_start.append(len(pts)); y = j*dy
+        if j % 2 == 0:                          # even: nx+1 pts
+            for i in range(nx+1): pts.append([i*dx, y])
+        else:                                   # odd:  nx+2 pts
+            pts.append([0., y])
+            for i in range(nx): pts.append([(i+.5)*dx, y])
+            pts.append([Lx, y])
+
+    pts   = np.array(pts, dtype=np.float64)
+    cells = []
+    for j in range(ny):
+        s0, s1 = row_start[j], row_start[j+1]
+        if j % 2 == 0:
+            # even (nx+1) → odd (nx+2)
+            # E: s0+0 … s0+nx   |   O: s1+0(x=0), s1+1…s1+nx(int), s1+nx+1(x=Lx)
+            cells.append([s0,    s1,    s1+1])              # left  boundary
+            for i in range(nx):
+                cells.append([s0+i, s0+i+1, s1+i+1])       # upward   ▲
+                if i < nx-1:
+                    cells.append([s0+i+1, s1+i+1, s1+i+2]) # downward ▽
+            cells.append([s0+nx, s1+nx, s1+nx+1])           # right boundary
+        else:
+            # odd (nx+2) → even (nx+1)
+            # O: s0+0(x=0), s0+1…s0+nx(int), s0+nx+1(x=Lx)   |   E: s1+0…s1+nx
+            cells.append([s0,      s1,    s0+1])             # left  boundary
+            for i in range(nx):
+                cells.append([s0+i+1, s1+i, s1+i+1])        # downward ▽
+                if i < nx-1:
+                    cells.append([s0+i+1, s0+i+2, s1+i+1])  # upward   ▲
+            cells.append([s0+nx+1, s0+nx, s1+nx])            # right boundary
+
+    return pts, np.array(cells, dtype=np.int64)
+
+
+def _build_kuhn(cfg: dict):
+    """
+    Kuhn / Freudenthal decomposition: 6 tetrahedra per cube.
+
+    For a chosen starting corner offset o=(ox,oy,oz) ∈ {0,1}³ within cube
+    (i,j,k), and for each permutation σ=(σ₁,σ₂,σ₃) of {x,y,z}, the walk
+    starts at corner o and flips one coordinate at a time (in axis order σ)
+    until it reaches the opposite corner (1-ox, 1-oy, 1-oz):
+        v₀ = (i+ox,     j+oy,     k+oz)
+        v₁ = v₀ with coordinate σ₁ flipped
+        v₂ = v₁ with coordinate σ₂ flipped
+        v₃ = v₂ with coordinate σ₃ flipped  = (i+1-ox, j+1-oy, k+1-oz)
+    All 6 permutations share the same body-diagonal edge v₀-v₃.
+
+    diagonal:
+        'main'             (default) — o=(0,0,0) for every cube.
+                                        'fixed' is a backward-compatible alias.
+        'flip_x'                     — o=(1,0,0) for every cube.
+        'flip_y'                     — o=(0,1,0) for every cube.
+        'flip_z'                     — o=(0,0,1) for every cube.
+        'alternate_layers'            — o=(i%2, j%2, k%2): the diagonal
+                                        flips independently per layer index.
+
+    All five modes are conforming (adjacent cubes agree on shared-face
+    triangulations). The four fixed variants ('main', 'flip_x', 'flip_y',
+    'flip_z') apply the same constant offset to every cube, so a face
+    shared by two cubes trivially carries the same diagonal on both sides.
+    'alternate_layers' is the general conforming family derived from the
+    weaker constraint that the offset component normal to a face direction
+    may only depend on the layer index along that direction.
+    """
+    Lx, Ly, Lz = cfg["box_length"]; nx, ny, nz = cfg["n_divisions"]
+
+    raw = cfg.get("diagonal", "main")
+    diagonal = "main" if raw == "fixed" else raw   # 'fixed' = backward-compat alias
+
+    fixed_offsets = {
+        "main":   (0, 0, 0),
+        "flip_x": (1, 0, 0),
+        "flip_y": (0, 1, 0),
+        "flip_z": (0, 0, 1),
+    }
+    if diagonal not in fixed_offsets and diagonal != "alternate_layers":
+        valid_display = sorted(fixed_offsets) + ["alternate_layers", "fixed"]
+        raise ValueError(f"'diagonal' must be one of {valid_display}, got '{raw}'")
+
+    xs = np.linspace(0., Lx, nx+1)
+    ys = np.linspace(0., Ly, ny+1)
+    zs = np.linspace(0., Lz, nz+1)
+
+    def vid(i, j, k): return k*(ny+1)*(nx+1) + j*(nx+1) + i
+
+    pts = np.array([[xs[i], ys[j], zs[k]]
+                    for k in range(nz+1)
+                    for j in range(ny+1)
+                    for i in range(nx+1)], dtype=np.float64)
+
+    if diagonal == "alternate_layers":
+        def start_offset(i, j, k): return (i % 2, j % 2, k % 2)
+    else:
+        _o = fixed_offsets[diagonal]
+        def start_offset(i, j, k): return _o
+
+    cells = []
+    for k in range(nz):
+        for j in range(ny):
+            for i in range(nx):
+                o = list(start_offset(i, j, k))
+                for perm in _KUHN_PERMS:
+                    cur = list(o)
+                    tet = [vid(i+cur[0], j+cur[1], k+cur[2])]
+                    for axis in perm:
+                        cur[axis] = 1 - cur[axis]
+                        tet.append(vid(i+cur[0], j+cur[1], k+cur[2]))
+                    cells.append(tet)
+
+    return pts, np.array(cells, dtype=np.int64)
+
+
+# ── Boundary markers for structured meshes ─────────────────────────────────────
+
+def _pt_markers_2d(pts: np.ndarray, Lx: float, Ly: float,
+                   tol: float = 1e-9) -> np.ndarray:
+    """Assign boundary markers; lower number wins at corners (bottom=1 has priority)."""
+    mk = np.zeros(len(pts), dtype=np.int32)
+    x, y = pts[:, 0], pts[:, 1]
+    mk[np.abs(x)        < tol] = _MK2["left"]
+    mk[np.abs(y - Ly)   < tol] = _MK2["top"]
+    mk[np.abs(x - Lx)   < tol] = _MK2["right"]
+    mk[np.abs(y)        < tol] = _MK2["bottom"]   # highest priority
+    return mk
+
+
+def _edge_markers_2d(pts: np.ndarray, edges: np.ndarray,
+                     Lx: float, Ly: float, tol: float = 1e-9) -> np.ndarray:
+    """An edge is a boundary edge iff both endpoints lie on the same boundary face."""
+    a, b = edges[:, 0], edges[:, 1]
+    xa, ya = pts[a, 0], pts[a, 1]
+    xb, yb = pts[b, 0], pts[b, 1]
+    mk = np.zeros(len(edges), dtype=np.int32)
+    mk[(np.abs(xa)      < tol) & (np.abs(xb)      < tol)] = _MK2["left"]
+    mk[(np.abs(ya-Ly)   < tol) & (np.abs(yb-Ly)   < tol)] = _MK2["top"]
+    mk[(np.abs(xa-Lx)   < tol) & (np.abs(xb-Lx)   < tol)] = _MK2["right"]
+    mk[(np.abs(ya)      < tol) & (np.abs(yb)       < tol)] = _MK2["bottom"]
+    return mk
+
+
+def _pt_markers_3d(pts: np.ndarray, Lx: float, Ly: float, Lz: float,
+                   obstacles=None, tol: float = 1e-9) -> np.ndarray:
+    """
+    Assign boundary markers from coordinates: box faces (1-6, lower number
+    wins at corners/edges) plus, if given, obstacle surfaces (100+idx).
+
+    For sphere obstacles the surface is a polyhedral (icosphere)
+    approximation, so points on it satisfy dist(center) ∈ [r - surf_tol, r]
+    rather than exactly r; 'surf_tol' (computed in _icosphere) accounts
+    for that. Box obstacles are exact planes, checked directly.
+    """
+    mk = np.zeros(len(pts), dtype=np.int32)
+    x, y, z = pts[:, 0], pts[:, 1], pts[:, 2]
+    mk[np.abs(z - Lz) < tol] = _MK3["zmax"]
+    mk[np.abs(z)      < tol] = _MK3["zmin"]
+    mk[np.abs(y - Ly) < tol] = _MK3["ymax"]
+    mk[np.abs(y)      < tol] = _MK3["ymin"]
+    mk[np.abs(x - Lx) < tol] = _MK3["xmax"]
+    mk[np.abs(x)      < tol] = _MK3["xmin"]   # highest priority among box faces
+
+    for obs in (obstacles or []):
+        marker = obs["marker"]
+        interior = (mk == 0)   # never overwrite a box-face marker
+        if obs["shape"] == "sphere":
+            cx, cy, cz = obs["center"]; r = obs["radius"]
+            band = max(obs.get("surf_tol", 1e-9), tol)
+            dist = np.sqrt((x-cx)**2 + (y-cy)**2 + (z-cz)**2)
+            on_surf = (dist <= r + tol) & (dist >= r - band)
+        else:  # box
+            cx, cy, cz = obs["center"]; hx, hy, hz = obs["half_extents"]
+            x0,x1,y0,y1,z0,z1 = cx-hx,cx+hx,cy-hy,cy+hy,cz-hz,cz+hz
+            near_x = (np.abs(x-x0)<tol) | (np.abs(x-x1)<tol)
+            near_y = (np.abs(y-y0)<tol) | (np.abs(y-y1)<tol)
+            near_z = (np.abs(z-z0)<tol) | (np.abs(z-z1)<tol)
+            in_x = (x>=x0-tol) & (x<=x1+tol)
+            in_y = (y>=y0-tol) & (y<=y1+tol)
+            in_z = (z>=z0-tol) & (z<=z1+tol)
+            on_surf = (near_x&in_y&in_z) | (near_y&in_x&in_z) | (near_z&in_x&in_y)
+        mk[interior & on_surf] = marker
+
+    return mk
+
+
+# ── Edge extraction ────────────────────────────────────────────────────────────
+
+def _edges_from_cells(cells: np.ndarray) -> np.ndarray:
+    """Extract all unique sorted edges from cell-to-vertex connectivity."""
+    n = cells.shape[1]
+    pairs = np.concatenate(
+        [np.sort(cells[:, [i, j]], axis=1) for i, j in combinations(range(n), 2)]
+    )
+    return np.unique(pairs, axis=0).astype(np.int64)
+
+
+# ── Vertex-to-cell (CSR) ───────────────────────────────────────────────────────
+
+def _vertex_to_cell(n_pts: int, cells: np.ndarray):
+    """
+    CSR vertex-to-cell map.
+    cells incident to vertex v:  indices[ offsets[v] : offsets[v+1] ]
+    """
+    n_per = cells.shape[1]
+    v_ids = cells.ravel()
+    c_ids = np.repeat(np.arange(len(cells), dtype=np.int64), n_per)
+    order = np.argsort(v_ids, kind="stable")
+    c_ids, v_ids = c_ids[order], v_ids[order]
+    counts  = np.bincount(v_ids, minlength=n_pts).astype(np.int64)
+    offsets = np.zeros(n_pts+1, dtype=np.int64); offsets[1:] = np.cumsum(counts)
+    return offsets, c_ids
+
+
+# ── Periodic pair detection ────────────────────────────────────────────────────
+
+def _periodic_pairs(pts: np.ndarray, box: list, periodic: list,
+                    bnd_tol: float = 1e-9, match_tol: float = 1e-7) -> dict:
+    """
+    For each periodic direction d match vertices on face coord_d≈0 to
+    vertices on face coord_d≈L_d by nearest-neighbour on remaining coords.
+    """
+    pairs: dict = {}
+    d_pts = pts.shape[1]
+    for d in range(len(periodic)):
+        if not periodic[d]: continue
+        L, dname = box[d], _DIRS[d]
+        other = [i for i in range(d_pts) if i != d]
+        lo = np.where(np.abs(pts[:, d])     < bnd_tol)[0]
+        hi = np.where(np.abs(pts[:, d] - L) < bnd_tol)[0]
+        if lo.size == 0 or hi.size == 0:
+            print(f"  [warn] periodic_{dname}: no boundary vertices found")
+            pairs[dname] = np.empty((0,2), dtype=np.int64); continue
+        if lo.size != hi.size:
+            print(f"  [warn] periodic_{dname}: {lo.size} lo vs {hi.size} hi vertices")
+        lo_co, hi_co = pts[lo][:, other], pts[hi][:, other]
+        matched, n_miss = [], 0
+        for i, vi in enumerate(lo):
+            dist = np.linalg.norm(hi_co - lo_co[i], axis=1); j = int(np.argmin(dist))
+            if dist[j] < match_tol: matched.append([vi, hi[j]])
+            else: n_miss += 1
+        pairs[dname] = (np.array(matched, dtype=np.int64) if matched
+                        else np.empty((0,2), dtype=np.int64))
+        status = f"{len(matched):,} pairs" + (f", {n_miss} unmatched" if n_miss else "")
+        print(f"  periodic_{dname}: {status}")
+    return pairs
+
+
+# ── HDF5 writer ────────────────────────────────────────────────────────────────
+
+def write_hdf5(h5_path: str,
+               pts3d: np.ndarray, cells: np.ndarray, edges: np.ndarray,
+               v2c_off: np.ndarray, v2c_idx: np.ndarray,
+               pt_mk: np.ndarray, edge_mk,
+               periodic: list, per_pairs: dict,
+               box: list, dim: int, obstacles=None) -> None:
+    obstacles = obstacles or []
+    kw = dict(compression="gzip", compression_opts=4)
+    with h5py.File(h5_path, "w") as f:
+        f.attrs.update({"mesh_type" : "triangle" if dim==2 else "tetra",
+                        "dimension" : dim, "box_length": list(box),
+                        "n_vertices": int(len(pts3d)), "n_cells": int(len(cells)),
+                        "n_edges"   : int(len(edges))})
+        f.create_dataset("points",           data=pts3d, **kw)
+        f.create_dataset("cell_to_vertex",   data=cells, **kw)
+        f.create_dataset("vertex_to_vertex", data=edges, **kw)
+        g = f.create_group("vertex_to_cell")
+        g.attrs["format"] = "CSR"
+        g.attrs["description"] = "indices[offsets[v]:offsets[v+1]] = cells of vertex v"
+        g.create_dataset("offsets", data=v2c_off, **kw)
+        g.create_dataset("indices", data=v2c_idx, **kw)
+        b = f.create_group("boundary")
+        b.create_dataset("point_markers", data=pt_mk, **kw)
+        if edge_mk is not None:
+            b.create_dataset("edge_markers", data=edge_mk, **kw)
+        p = f.create_group("periodicity")
+        for d_name, is_per in zip(_DIRS[:dim], periodic):
+            p.attrs[f"periodic_{d_name}"] = bool(is_per)
+        for d_name, arr in per_pairs.items():
+            p.attrs[f"periodic_{d_name}"] = True
+            if len(arr): p.create_dataset(f"{d_name}_pairs", data=arr, **kw)
+        if obstacles:
+            o = f.create_group("obstacles")
+            o.attrs["count"] = len(obstacles)
+            for i, obs in enumerate(obstacles):
+                og = o.create_group(f"obstacle_{i}")
+                og.attrs["shape"]  = obs["shape"]
+                og.attrs["marker"] = obs["marker"]
+                og.attrs["center"] = list(obs["center"])
+                if obs["shape"] in ("circle", "sphere"):
+                    og.attrs["radius"] = obs["radius"]
+                else:
+                    og.attrs["half_extents"] = list(obs["half_extents"])
+    print(f"\n  HDF5 written → {h5_path}")
+    print(f"    vertices : {len(pts3d):>10,}")
+    print(f"    cells    : {len(cells):>10,}")
+    print(f"    edges    : {len(edges):>10,}")
+    if obstacles:
+        print(f"    obstacles: {len(obstacles):>10,}")
+
+
+# ── XDMF writer ────────────────────────────────────────────────────────────────
+
+def write_xdmf(xdmf_path: str, h5_path: str,
+               n_pts: int, n_cells: int, n_edges: int, dim: int) -> None:
+    """
+    Two grids in a Spatial Collection:
+      'cells' — volume mesh (Triangle / Tetrahedron topology)
+      'edges' — wire skeleton (Polyline topology)
+    Toggle visibility per grid in ParaView's Pipeline Browser.
+    Obstacle holes need no special handling here — they simply have no
+    cells, so ParaView renders the cavity automatically; obstacle boundary
+    markers are visible via the BoundaryMarker point attribute (10+/100+).
+    XDMF and HDF5 must reside in the same directory.
+    """
+    h5  = Path(h5_path).name
+    tt  = "Triangle" if dim==2 else "Tetrahedron"
+    nn  = 3 if dim==2 else 4
+    geo = f"{n_pts} 3"
+    def di(dims, dset, dtype="Int", prec=None):
+        pr = f' Precision="{prec}"' if prec else ""
+        return (f'<DataItem Format="HDF" DataType="{dtype}"{pr} '
+                f'Dimensions="{dims}">{h5}:{dset}</DataItem>')
+    cell_grid = (
+        f'    <Grid Name="cells" GridType="Uniform">\n'
+        f'      <Topology TopologyType="{tt}" NumberOfElements="{n_cells}">\n'
+        f'        {di(f"{n_cells} {nn}", "/cell_to_vertex")}\n'
+        f'      </Topology>\n'
+        f'      <Geometry GeometryType="XYZ">\n'
+        f'        {di(geo, "/points", "Float", 8)}\n'
+        f'      </Geometry>\n'
+        f'      <Attribute Name="BoundaryMarker" AttributeType="Scalar" Center="Node">\n'
+        f'        {di(f"{n_pts}", "/boundary/point_markers")}\n'
+        f'      </Attribute>\n'
+        f'    </Grid>')
+    edge_grid = (
+        f'    <Grid Name="edges" GridType="Uniform">\n'
+        f'      <Topology TopologyType="Polyline" NumberOfElements="{n_edges}"\n'
+        f'                NodesPerElement="2">\n'
+        f'        {di(f"{n_edges} 2", "/vertex_to_vertex")}\n'
+        f'      </Topology>\n'
+        f'      <Geometry GeometryType="XYZ">\n'
+        f'        {di(geo, "/points", "Float", 8)}\n'
+        f'      </Geometry>\n'
+        f'    </Grid>')
+    xdmf = ('<?xml version="1.0" ?>\n'
+            '<!DOCTYPE Xdmf SYSTEM "Xdmf.dtd" []>\n'
+            '<Xdmf Version="3.0">\n  <Domain>\n'
+            '    <!-- Spatial collection: "cells" and "edges" share /points. -->\n'
+            '    <!-- Toggle visibility per grid in ParaView Pipeline Browser. -->\n'
+            '    <Grid Name="MeshCollection" GridType="Collection"\n'
+            '          CollectionType="Spatial">\n'
+            f'{cell_grid}\n{edge_grid}\n'
+            '    </Grid>\n  </Domain>\n</Xdmf>\n')
+    Path(xdmf_path).write_text(xdmf)
+    print(f"  XDMF written → {xdmf_path}")
+
+
+# ── Entry point ────────────────────────────────────────────────────────────────
+
+def main(yaml_path: str) -> None:
+    cfg = load_config(yaml_path)
+    mt  = cfg["mesh_type"]
+    per = cfg["periodic"]
+    box = cfg["box_length"]
+    dim = 2 if mt in _2D_TYPES else 3
+
+    _validate_obstacles(cfg.get("obstacles", []), box, dim, mt)
+
+    print(f"Building '{mt}' mesh …")
+
+    edge_mk = None          # only set for 2-D types that provide it
+    obstacle_meta = []      # only set for 'triangle' / 'tetra'
+
+    # ── dispatch to builder ──────────────────────────────────────────────────
+    if mt == "triangle":
+        pts, cells, edges, pt_mk, edge_mk, obstacle_meta = _build_2d(cfg)
+
+    elif mt == "tetra":
+        pts, cells, edges, pt_mk, obstacle_meta = _build_3d(cfg)
+
+    elif mt == "gridsplit":
+        pts, cells = _build_gridsplit(cfg)
+        edges  = _edges_from_cells(cells)
+        pt_mk  = _pt_markers_2d(pts, *box)
+        edge_mk = _edge_markers_2d(pts, edges, *box)
+
+    elif mt == "equilateral":
+        pts, cells = _build_equilateral(cfg)
+        edges  = _edges_from_cells(cells)
+        pt_mk  = _pt_markers_2d(pts, *box)
+        edge_mk = _edge_markers_2d(pts, edges, *box)
+
+    elif mt == "kuhn":
+        pts, cells = _build_kuhn(cfg)
+        edges  = _edges_from_cells(cells)
+        pt_mk  = _pt_markers_3d(pts, *box)
+
+    # ── pad 2-D coordinates to 3-D (z = 0) for uniform XDMF geometry ────────
+    if dim == 2:
+        pts3d      = np.column_stack([pts, np.zeros(len(pts))])
+        pts_for_per = pts              # use native 2-D coords for pairing
+    else:
+        pts3d = pts_for_per = pts
+
+    print("Computing vertex-to-cell connectivity …")
+    v2c_off, v2c_idx = _vertex_to_cell(len(pts3d), cells)
+
+    print("Detecting periodic vertex pairs …")
+    per_pairs = _periodic_pairs(pts_for_per, box, per)
+
+    hdf5_path = str(Path(yaml_path).with_suffix(".h5"))
+    xdmf_path = str(Path(yaml_path).with_suffix(".xdmf"))
+
+    write_hdf5(hdf5_path,
+               pts3d, cells, edges, v2c_off, v2c_idx, pt_mk, edge_mk,
+               per, per_pairs, box, dim, obstacle_meta)
+    write_xdmf(xdmf_path, hdf5_path,
+               len(pts3d), len(cells), len(edges), dim)
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        sys.exit(f"Usage: {sys.argv[0]} config.yaml")
+    main(sys.argv[1])

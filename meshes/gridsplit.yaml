@@ -1,0 +1,5 @@
+mesh_type: gridsplit
+box_length:  [1.0, 1.0]
+n_divisions: [9, 9]      # nx, ny cells → 2·nx·ny triangles
+diagonal:    alternate     # or: backslash | slash
+periodic:    [true, true]

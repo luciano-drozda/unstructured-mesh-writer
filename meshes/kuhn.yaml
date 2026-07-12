@@ -1,0 +1,6 @@
+mesh_type: kuhn
+box_length:  [1.0, 1.0, 1.0]
+n_divisions: [3, 3, 3]          # → 6·nx·ny·nz tetrahedra
+# diagonal:    alternate_layers   # or: fixed
+diagonal:    flip_y   # default. Also: flip_x | flip_y | flip_z | alternate_layers
+periodic:    [true, true, false]

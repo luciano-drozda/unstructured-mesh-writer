@@ -1,0 +1,9 @@
+mesh_type: tetra
+box_length:  [1.0, 1.0, 1.0]
+n_divisions: [6, 6, 6]
+periodic:    [true, true, false]
+quality:
+  max_volume: ~
+# output:
+#   hdf5: mesh_tetra.h5
+#   xdmf: mesh_tetra.xdmf
