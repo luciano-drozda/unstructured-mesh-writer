@@ -140,6 +140,15 @@ HDF5 layout
 
   /points              float64  (n_pts,  3)     z=0 for 2-D
   /cell_to_vertex      int64    (n_cells, d)    d=3 (tri) | 4 (tet)
+  /cell_to_edge        int64    (n_cells, e)    e=3 (tri) | 6 (tet); each
+                                                entry indexes a row of
+                                                /vertex_to_vertex. Local edge
+                                                order follows
+                                                itertools.combinations of the
+                                                cell's local vertex indices:
+                                                  tri  (0,1),(0,2),(1,2)
+                                                  tet  (0,1),(0,2),(0,3),
+                                                       (1,2),(1,3),(2,3)
   /vertex_to_vertex    int64    (n_edges, 2)    all unique sorted edges
   /vertex_to_cell/
       offsets          int64    (n_pts+1,)      CSR row pointers
@@ -786,6 +795,40 @@ def _edges_from_cells(cells: np.ndarray) -> np.ndarray:
     return np.unique(pairs, axis=0).astype(np.int64)
 
 
+# ── Cell-to-edge ───────────────────────────────────────────────────────────────
+
+def _cell_to_edge(cells: np.ndarray, edges: np.ndarray, n_pts: int) -> np.ndarray:
+    """
+    cell_to_edge[c, e] = row index into 'edges' (vertex_to_vertex) of the
+    e-th local edge of cell c. Local edge order follows
+    itertools.combinations(range(d), 2) over the cell's d local vertex slots
+    (matches the order _edges_from_cells uses to enumerate edges):
+        triangle (d=3): (0,1), (0,2), (1,2)
+        tetra    (d=4): (0,1), (0,2), (0,3), (1,2), (1,3), (2,3)
+
+    Implementation: encode each undirected vertex pair (a,b) as a single
+    integer key = min(a,b)*n_pts + max(a,b), sort the encoded 'edges' once,
+    then binary-search each cell's local-edge keys against that sorted array
+    -- O((n_cells*n_local + n_edges) log n_edges) overall, no per-cell dict.
+    """
+    d = cells.shape[1]
+    local_pairs = list(combinations(range(d), 2))
+
+    e_sorted   = np.sort(edges, axis=1).astype(np.int64)
+    key_edges  = e_sorted[:, 0] * n_pts + e_sorted[:, 1]
+    order      = np.argsort(key_edges)          # order[i] = original edge index
+    key_sorted = key_edges[order]
+
+    cell_to_edge = np.empty((len(cells), len(local_pairs)), dtype=np.int64)
+    for li, (a, b) in enumerate(local_pairs):
+        va, vb = cells[:, a].astype(np.int64), cells[:, b].astype(np.int64)
+        key = np.minimum(va, vb) * n_pts + np.maximum(va, vb)
+        pos = np.searchsorted(key_sorted, key)
+        cell_to_edge[:, li] = order[pos]
+
+    return cell_to_edge
+
+
 # ── Vertex-to-cell (CSR) ───────────────────────────────────────────────────────
 
 def _vertex_to_cell(n_pts: int, cells: np.ndarray):
@@ -841,6 +884,7 @@ def _periodic_pairs(pts: np.ndarray, box: list, periodic: list,
 
 def write_hdf5(h5_path: str,
                pts3d: np.ndarray, cells: np.ndarray, edges: np.ndarray,
+               c2e: np.ndarray,
                v2c_off: np.ndarray, v2c_idx: np.ndarray,
                pt_mk: np.ndarray, edge_mk,
                periodic: list, per_pairs: dict,
@@ -854,6 +898,11 @@ def write_hdf5(h5_path: str,
                         "n_edges"   : int(len(edges))})
         f.create_dataset("points",           data=pts3d, **kw)
         f.create_dataset("cell_to_vertex",   data=cells, **kw)
+        d_c2e = f.create_dataset("cell_to_edge", data=c2e, **kw)
+        d_c2e.attrs["description"] = ("cell_to_edge[c,e] indexes a row of "
+                                      "/vertex_to_vertex; local edge order = "
+                                      "itertools.combinations of the cell's "
+                                      "local vertex indices")
         f.create_dataset("vertex_to_vertex", data=edges, **kw)
         g = f.create_group("vertex_to_cell")
         g.attrs["format"] = "CSR"
@@ -994,6 +1043,9 @@ def main(yaml_path: str) -> None:
     else:
         pts3d = pts_for_per = pts
 
+    print("Computing cell-to-edge connectivity …")
+    c2e = _cell_to_edge(cells, edges, len(pts3d))
+
     print("Computing vertex-to-cell connectivity …")
     v2c_off, v2c_idx = _vertex_to_cell(len(pts3d), cells)
 
@@ -1004,7 +1056,7 @@ def main(yaml_path: str) -> None:
     xdmf_path = str(Path(yaml_path).with_suffix(".xdmf"))
 
     write_hdf5(hdf5_path,
-               pts3d, cells, edges, v2c_off, v2c_idx, pt_mk, edge_mk,
+               pts3d, cells, edges, c2e, v2c_off, v2c_idx, pt_mk, edge_mk,
                per, per_pairs, box, dim, obstacle_meta)
     write_xdmf(xdmf_path, hdf5_path,
                len(pts3d), len(cells), len(edges), dim)
