@@ -149,6 +149,8 @@ HDF5 layout
                                                   tri  (0,1),(0,2),(1,2)
                                                   tet  (0,1),(0,2),(0,3),
                                                        (1,2),(1,3),(2,3)
+  /cell_vol            float64  (n_cells,)      triangle area (2-D) |
+                                                tetra volume (3-D)
   /vertex_to_vertex    int64    (n_edges, 2)    all unique sorted edges
   /vertex_to_cell/
       offsets          int64    (n_pts+1,)      CSR row pointers
@@ -829,6 +831,32 @@ def _cell_to_edge(cells: np.ndarray, edges: np.ndarray, n_pts: int) -> np.ndarra
     return cell_to_edge
 
 
+# ── Cell volumes / areas ────────────────────────────────────────────────────────
+
+def _cell_volumes(pts: np.ndarray, cells: np.ndarray, dim: int) -> np.ndarray:
+    """
+    Per-cell measure: triangle area (2-D) or tetrahedron volume (3-D).
+
+    2-D (shoelace formula on the x,y components; z is 0 for these meshes):
+        area = 0.5 * |x0(y1-y2) + x1(y2-y0) + x2(y0-y1)|
+
+    3-D (scalar triple product):
+        volume = |(p1-p0) · [(p2-p0) × (p3-p0)]| / 6
+    """
+    if dim == 2:
+        p0, p1, p2 = pts[cells[:, 0], :2], pts[cells[:, 1], :2], pts[cells[:, 2], :2]
+        return 0.5 * np.abs(
+            p0[:, 0] * (p1[:, 1] - p2[:, 1]) +
+            p1[:, 0] * (p2[:, 1] - p0[:, 1]) +
+            p2[:, 0] * (p0[:, 1] - p1[:, 1])
+        )
+    else:
+        p0 = pts[cells[:, 0]]; p1 = pts[cells[:, 1]]
+        p2 = pts[cells[:, 2]]; p3 = pts[cells[:, 3]]
+        cross = np.cross(p2 - p0, p3 - p0)
+        return np.abs(np.einsum('ij,ij->i', p1 - p0, cross)) / 6.0
+
+
 # ── Vertex-to-cell (CSR) ───────────────────────────────────────────────────────
 
 def _vertex_to_cell(n_pts: int, cells: np.ndarray):
@@ -884,7 +912,7 @@ def _periodic_pairs(pts: np.ndarray, box: list, periodic: list,
 
 def write_hdf5(h5_path: str,
                pts3d: np.ndarray, cells: np.ndarray, edges: np.ndarray,
-               c2e: np.ndarray,
+               c2e: np.ndarray, cell_vol: np.ndarray,
                v2c_off: np.ndarray, v2c_idx: np.ndarray,
                pt_mk: np.ndarray, edge_mk,
                periodic: list, per_pairs: dict,
@@ -903,6 +931,10 @@ def write_hdf5(h5_path: str,
                                       "/vertex_to_vertex; local edge order = "
                                       "itertools.combinations of the cell's "
                                       "local vertex indices")
+        d_vol = f.create_dataset("cell_vol", data=cell_vol, **kw)
+        d_vol.attrs["description"] = ("triangle area (2-D) or tetrahedron "
+                                      "volume (3-D) of each cell, same order "
+                                      "as /cell_to_vertex")
         f.create_dataset("vertex_to_vertex", data=edges, **kw)
         g = f.create_group("vertex_to_cell")
         g.attrs["format"] = "CSR"
@@ -935,6 +967,7 @@ def write_hdf5(h5_path: str,
     print(f"    vertices : {len(pts3d):>10,}")
     print(f"    cells    : {len(cells):>10,}")
     print(f"    edges    : {len(edges):>10,}")
+    print(f"    cell_vol : min={cell_vol.min():.6g}  max={cell_vol.max():.6g}")
     if obstacles:
         print(f"    obstacles: {len(obstacles):>10,}")
 
@@ -945,7 +978,8 @@ def write_xdmf(xdmf_path: str, h5_path: str,
                n_pts: int, n_cells: int, n_edges: int, dim: int) -> None:
     """
     Two grids in a Spatial Collection:
-      'cells' — volume mesh (Triangle / Tetrahedron topology)
+      'cells' — volume mesh (Triangle / Tetrahedron topology), with
+                BoundaryMarker (point data) and CellVolume (cell data)
       'edges' — wire skeleton (Polyline topology)
     Toggle visibility per grid in ParaView's Pipeline Browser.
     Obstacle holes need no special handling here — they simply have no
@@ -971,6 +1005,9 @@ def write_xdmf(xdmf_path: str, h5_path: str,
         f'      </Geometry>\n'
         f'      <Attribute Name="BoundaryMarker" AttributeType="Scalar" Center="Node">\n'
         f'        {di(f"{n_pts}", "/boundary/point_markers")}\n'
+        f'      </Attribute>\n'
+        f'      <Attribute Name="CellVolume" AttributeType="Scalar" Center="Cell">\n'
+        f'        {di(f"{n_cells}", "/cell_vol", "Float", 8)}\n'
         f'      </Attribute>\n'
         f'    </Grid>')
     edge_grid = (
@@ -1046,6 +1083,9 @@ def main(yaml_path: str) -> None:
     print("Computing cell-to-edge connectivity …")
     c2e = _cell_to_edge(cells, edges, len(pts3d))
 
+    print("Computing cell volumes …")
+    cell_vol = _cell_volumes(pts3d, cells, dim)
+
     print("Computing vertex-to-cell connectivity …")
     v2c_off, v2c_idx = _vertex_to_cell(len(pts3d), cells)
 
@@ -1056,7 +1096,7 @@ def main(yaml_path: str) -> None:
     xdmf_path = str(Path(yaml_path).with_suffix(".xdmf"))
 
     write_hdf5(hdf5_path,
-               pts3d, cells, edges, c2e, v2c_off, v2c_idx, pt_mk, edge_mk,
+               pts3d, cells, edges, c2e, cell_vol, v2c_off, v2c_idx, pt_mk, edge_mk,
                per, per_pairs, box, dim, obstacle_meta)
     write_xdmf(xdmf_path, hdf5_path,
                len(pts3d), len(cells), len(edges), dim)
