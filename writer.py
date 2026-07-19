@@ -30,6 +30,8 @@ YAML keys
       max_area   : float  (Triangle; auto if omitted)
       max_volume : float  (TetGen;   auto if omitted)
   diagonal    : (gridsplit / kuhn only, see notes below)
+  stretching_ratio     : (gridsplit / kuhn only, see 'Grid stretching' below)
+  stretching_symmetric : (gridsplit / kuhn only, see 'Grid stretching' below)
   obstacles   : (triangle / tetra only — see 'Obstacles' below)
 
 Output files
@@ -52,6 +54,13 @@ Notes on structured types
           alternate           : checkerboard mix of the two (still all
                                 congruent triangles, up to reflection)
 
+      Optional 'stretching_ratio'/'stretching_symmetric' (per-axis lists,
+      default [1.0, 1.0] / [false, false]) apply geometric grid stretching
+      along x and/or y independently — see 'Grid stretching' below. Note:
+      enabling stretching on either axis makes dx and/or dy vary across the
+      grid, so cells are NO LONGER congruent; the structured tensor-product
+      topology (and hence periodicity/diagonal handling) is unaffected.
+
   equilateral
       Even rows: nx+1 points at x = 0, dx, ..., Lx
       Odd  rows: nx+2 points at x = 0, dx/2, ..., Lx  (boundary points added)
@@ -59,6 +68,8 @@ Notes on structured types
           Ly / ny  =  (Lx / nx) * sqrt(3)/2  ≈  0.866 * Lx/nx
       Left/right boundary triangles are right-angle (unavoidable on a box).
       For y-periodic meshes choose ny even so top/bottom rows are both even.
+      No stretching support (the offset-row layout does not generalize to
+      a simple per-axis stretched grid).
 
   kuhn
       Each axis-aligned cube → 6 tetrahedra via all permutations of the three
@@ -89,6 +100,50 @@ Notes on structured types
       cube's rotational symmetry (same local tet shapes, different global
       grain direction); for non-cubic cells they are genuinely different
       tet-shape families.
+
+      Optional 'stretching_ratio'/'stretching_symmetric' (per-axis lists,
+      default [1.0, 1.0, 1.0] / [false, false, false]) apply geometric grid
+      stretching along x, y and/or z independently — see 'Grid stretching'
+      below. As with gridsplit, enabling stretching breaks the 'congruent
+      Sommerville tet' guarantee described above; the 6-tets-per-cube
+      decomposition and its conformity/periodicity properties are otherwise
+      unaffected.
+
+Grid stretching (gridsplit / kuhn only)
+------------------------------------------
+  stretching_ratio     : per-axis list, e.g. [1.0, 1.0] (2-D) or
+                          [1.0, 1.0, 1.0] (3-D). 1.0 = uniform spacing
+                          (default). Any other positive value applies a
+                          geometric progression to the cell widths along
+                          that axis.
+  stretching_symmetric : per-axis list of bool, default all false.
+
+  Non-symmetric (symmetric: false), ratio r != 1:
+      Cell widths w_i = w0 * r**i for i = 0..n-1, chosen so they sum to the
+      axis length. r > 1 clusters cells near coord=0 (small cells growing
+      towards coord=L); r < 1 clusters cells near coord=L.
+
+  Symmetric (symmetric: true), ratio r != 1:
+      The axis is split at its midpoint; each half independently follows
+      the same one-sided progression, mirrored about the midpoint.
+      r > 1 clusters cells at BOTH boundaries (sparse at the center) — the
+      classic wall-clustered grid used e.g. for boundary-layer resolution
+      in channel/duct flows. r < 1 clusters cells at the CENTER (sparse at
+      both boundaries).
+      If n_divisions along that axis is odd, the two mirrored halves have
+      slightly different cell counts, producing a small kink at the exact
+      center; use an even n_divisions for a perfectly symmetric grid (a
+      [warn] is printed when this occurs).
+
+  A stretching ratio has no visible effect on an axis with only 1 cell
+  (one-sided) or fewer than 2 cells per half (symmetric with n_divisions
+  < 4), since a lone cell always spans its full span regardless of ratio.
+
+  Stretching only redistributes vertex positions along each axis; it does
+  not change the topology (cell count, diagonal pattern, periodicity
+  matching) established by n_divisions/diagonal — only the physical
+  spacing dx/dy/dz becomes non-uniform, so cells are no longer congruent
+  once stretching is enabled on an axis.
 
 Obstacles (triangle / tetra only)
 ----------------------------------
@@ -194,6 +249,7 @@ _ALL_TYPES = _2D_TYPES | _3D_TYPES
 _OBSTACLE_TYPES = {"triangle", "tetra"}
 _OBSTACLE_SHAPES_2D = {"circle", "rectangle"}
 _OBSTACLE_SHAPES_3D = {"sphere", "box"}
+_STRETCH_TYPES = {"gridsplit", "kuhn"}
 
 # Pre-computed Kuhn permutations (used in _build_kuhn)
 _KUHN_PERMS = list(_iperms([0, 1, 2]))   # 6 permutations of {x, y, z}
@@ -211,8 +267,11 @@ def load_config(path: str) -> dict:
     cfg.setdefault("periodic",  [False] * dim)
     cfg.setdefault("quality",   {})
     cfg.setdefault("obstacles", [])
+    cfg.setdefault("stretching_ratio",     [1.0] * dim)
+    cfg.setdefault("stretching_symmetric", [False] * dim)
 
-    for key in ("box_length", "n_divisions", "periodic"):
+    for key in ("box_length", "n_divisions", "periodic",
+               "stretching_ratio", "stretching_symmetric"):
         if len(cfg[key]) != dim:
             raise ValueError(f"'{key}' needs {dim} entries for mesh_type='{mt}'")
     return cfg
@@ -522,13 +581,73 @@ def _build_3d(cfg: dict):
     return pts, cells, edges, pt_mk, obstacle_meta
 
 
+# ── Grid stretching (gridsplit / kuhn only) ────────────────────────────────────
+
+def _stretched_coords(L: float, n: int, ratio: float = 1.0,
+                      symmetric: bool = False) -> np.ndarray:
+    """
+    Compute n+1 vertex coordinates along [0, L] with optional geometric grid
+    stretching. See the module docstring's 'Grid stretching' section for the
+    full semantics of 'ratio' and 'symmetric'.
+
+    ratio == 1.0 -> uniform spacing, regardless of 'symmetric'.
+    symmetric and n < 2 -> falls back to the one-sided formula (a lone cell,
+    or a domain that cannot be split into at least 1 cell per half, always
+    just spans its own length; there is nothing to mirror).
+    """
+    if abs(ratio - 1.0) < 1e-12:
+        return np.linspace(0., L, n + 1)
+
+    def _one_sided(length, n_cells):
+        w0 = length * (ratio - 1.0) / (ratio**n_cells - 1.0)
+        return w0 * ratio**np.arange(n_cells)
+
+    if not symmetric or n < 2:
+        widths = _one_sided(L, n)
+    else:
+        n1, n2 = n // 2, n - n // 2
+        half = L / 2.0
+        w_left  = _one_sided(half, n1) if n1 else np.array([])
+        w_right = (_one_sided(half, n2) if n2 else np.array([]))[::-1]
+        widths  = np.concatenate([w_left, w_right])
+
+    coords = np.concatenate([[0.], np.cumsum(widths)])
+    coords[-1] = L   # guard against floating-point drift
+    return coords
+
+
+def _validate_stretching(ratio: list, symmetric: list, n_divisions: list,
+                         dim: int, mesh_type: str) -> None:
+    """Raise on malformed stretching specs; print [warn] for odd-n symmetric axes."""
+    is_default = all(abs(r - 1.0) < 1e-12 for r in ratio) and not any(symmetric)
+    if mesh_type not in _STRETCH_TYPES and not is_default:
+        raise ValueError(
+            f"'stretching_ratio'/'stretching_symmetric' are only supported for "
+            f"mesh_type in {sorted(_STRETCH_TYPES)} (grid-based structured "
+            f"types); got mesh_type='{mesh_type}'")
+    for d, r in enumerate(ratio):
+        if r <= 0:
+            raise ValueError(f"stretching_ratio[{d}] must be > 0, got {r}")
+    if mesh_type in _STRETCH_TYPES:
+        for d, (sym, n) in enumerate(zip(symmetric, n_divisions)):
+            if sym and n % 2:
+                print(f"  [warn] stretching_symmetric on axis {_DIRS[d]}: "
+                      f"n_divisions={n} is odd -- the two mirrored halves "
+                      f"will have slightly different cell counts, giving a "
+                      f"small kink at the center; use an even value for a "
+                      f"perfectly symmetric grid")
+
+
 # ── Structured builders ────────────────────────────────────────────────────────
 
 def _build_gridsplit(cfg: dict):
     """
     Cartesian (nx+1)×(ny+1) grid, each rectangle split into two triangles.
     Produces 2·nx·ny congruent right triangles with legs dx=Lx/nx, dy=Ly/ny
-    (congruent up to reflection when diagonal='alternate').
+    (congruent up to reflection when diagonal='alternate'), UNLESS grid
+    stretching is enabled on an axis, in which case dx and/or dy vary and
+    cells are no longer congruent (see 'stretching_ratio'/'stretching_symmetric'
+    below and the module docstring's 'Grid stretching' section).
 
     diagonal:
         'backslash' (default) — split along (i+1,j)-(i,j+1)   "\\"
@@ -540,6 +659,11 @@ def _build_gridsplit(cfg: dict):
                                   introduces (e.g. for isotropic-looking
                                   gradients), while every triangle is still
                                   congruent to every other up to reflection.
+
+    stretching_ratio / stretching_symmetric:
+        Per-axis [rx, ry] / [sym_x, sym_y], default [1.0, 1.0] / [false, false].
+        Replaces the uniform np.linspace grid along each axis with a
+        geometrically stretched one; see _stretched_coords.
     """
     Lx, Ly = cfg["box_length"]; nx, ny = cfg["n_divisions"]
     diagonal = cfg.get("diagonal", "backslash")
@@ -547,7 +671,10 @@ def _build_gridsplit(cfg: dict):
     if diagonal not in valid:
         raise ValueError(f"'diagonal' must be one of {sorted(valid)}, got '{diagonal}'")
 
-    xs = np.linspace(0., Lx, nx+1); ys = np.linspace(0., Ly, ny+1)
+    rx, ry = cfg.get("stretching_ratio", [1.0, 1.0])
+    sx, sy = cfg.get("stretching_symmetric", [False, False])
+    xs = _stretched_coords(Lx, nx, rx, sx)
+    ys = _stretched_coords(Ly, ny, ry, sy)
     XX, YY = np.meshgrid(xs, ys)
     pts = np.column_stack([XX.ravel(), YY.ravel()])   # row-major: j*(nx+1)+i
 
@@ -666,6 +793,13 @@ def _build_kuhn(cfg: dict):
     'alternate_layers' is the general conforming family derived from the
     weaker constraint that the offset component normal to a face direction
     may only depend on the layer index along that direction.
+
+    stretching_ratio / stretching_symmetric:
+        Per-axis [rx, ry, rz] / [sym_x, sym_y, sym_z], default
+        [1.0, 1.0, 1.0] / [false, false, false]. Replaces the uniform
+        np.linspace grid along each axis with a geometrically stretched
+        one; see _stretched_coords. Breaks the 'congruent Sommerville tet'
+        guarantee on any axis where it is enabled.
     """
     Lx, Ly, Lz = cfg["box_length"]; nx, ny, nz = cfg["n_divisions"]
 
@@ -682,9 +816,11 @@ def _build_kuhn(cfg: dict):
         valid_display = sorted(fixed_offsets) + ["alternate_layers", "fixed"]
         raise ValueError(f"'diagonal' must be one of {valid_display}, got '{raw}'")
 
-    xs = np.linspace(0., Lx, nx+1)
-    ys = np.linspace(0., Ly, ny+1)
-    zs = np.linspace(0., Lz, nz+1)
+    rx, ry, rz = cfg.get("stretching_ratio", [1.0, 1.0, 1.0])
+    sx, sy, sz = cfg.get("stretching_symmetric", [False, False, False])
+    xs = _stretched_coords(Lx, nx, rx, sx)
+    ys = _stretched_coords(Ly, ny, ry, sy)
+    zs = _stretched_coords(Lz, nz, rz, sz)
 
     def vid(i, j, k): return k*(ny+1)*(nx+1) + j*(nx+1) + i
 
@@ -1043,6 +1179,8 @@ def main(yaml_path: str) -> None:
     dim = 2 if mt in _2D_TYPES else 3
 
     _validate_obstacles(cfg.get("obstacles", []), box, dim, mt)
+    _validate_stretching(cfg["stretching_ratio"], cfg["stretching_symmetric"],
+                         cfg["n_divisions"], dim, mt)
 
     print(f"Building '{mt}' mesh …")
 
