@@ -5,6 +5,3 @@ periodic:    [true, false]
 quality:
   min_angle: 20.0
   max_area:  ~
-# output:
-#   hdf5: mesh_triangle.h5
-#   xdmf: mesh_triangle.xdmf
