@@ -43,6 +43,19 @@ Output files
       meshes/triangle.h5
       meshes/triangle.xdmf
 
+  Provenance
+  ----------
+  After the .xdmf file above is written, three more blocks are appended to
+  it as XML comments, after the closing </Xdmf> tag:
+    1) the YAML config used for this run, verbatim
+    2) the terminal output produced while building this mesh (every
+       print() from load_config() through write_xdmf() -- i.e. everything
+       a plain 'python writer.py config.yaml' would show)
+    3) the full source of writer.py itself, as it existed at run time
+  This makes every .xdmf file a self-contained record of exactly how it
+  was produced. Literal '--' is not legal inside an XML comment, so each
+  block is passed through _xml_comment_safe() first.
+
 Notes on structured types
 --------------------------
   gridsplit
@@ -230,6 +243,7 @@ Boundary marker convention
   Corner/edge vertices receive the highest-priority face marker (lowest number).
 """
 
+import io
 import sys
 from itertools import combinations, permutations as _iperms
 from pathlib import Path
@@ -253,6 +267,22 @@ _STRETCH_TYPES = {"gridsplit", "kuhn"}
 
 # Pre-computed Kuhn permutations (used in _build_kuhn)
 _KUHN_PERMS = list(_iperms([0, 1, 2]))   # 6 permutations of {x, y, z}
+
+
+# ── stdout capture (provenance) ─────────────────────────────────────────────────
+
+class _Tee:
+    """Mirror writes to multiple streams at once (used to capture the run's
+    terminal output for embedding in the .xdmf file, while still printing
+    normally to the real terminal)."""
+    def __init__(self, *streams):
+        self.streams = streams
+    def write(self, data):
+        for s in self.streams:
+            s.write(data)
+    def flush(self):
+        for s in self.streams:
+            s.flush()
 
 
 # ── Configuration ──────────────────────────────────────────────────────────────
@@ -1170,75 +1200,132 @@ def write_xdmf(xdmf_path: str, h5_path: str,
     print(f"  XDMF written → {xdmf_path}")
 
 
+# ── Provenance (appended to the .xdmf as XML comments) ──────────────────────────
+
+def _xml_comment_safe(text: str) -> str:
+    """
+    Make arbitrary text safe to embed inside an XML comment <!-- ... -->.
+    XML forbids '--' anywhere inside a comment, and forbids the comment's
+    content from ending in '-' (which would otherwise yield '--->'). Loop
+    until no '--' remains, since replacing one occurrence can create a new
+    adjacent pair when the source has runs of 3+ hyphens.
+    """
+    safe = text
+    while "--" in safe:
+        safe = safe.replace("--", "- -")
+    if safe.endswith("-"):
+        safe += " "
+    return safe
+
+
+def _append_provenance(xdmf_path: str, yaml_path: str, yaml_text: str,
+                       terminal_text: str, script_text: str) -> None:
+    """
+    Append three XML comment blocks to the end of the .xdmf file, after the
+    closing </Xdmf> tag, so every .xdmf is a self-contained record of
+    exactly how it was produced:
+      1) the YAML config used for this run
+      2) the terminal output produced while building this mesh
+      3) the full source of writer.py itself
+    """
+    def block(label: str, content: str) -> str:
+        return (f"\n\n<!-- ===== {label} =====\n"
+                f"{_xml_comment_safe(content)}\n"
+                f"===== end {label} ===== -->\n")
+
+    with open(xdmf_path, "a") as f:
+        f.write("\n")
+        f.write(block(f"YAML CONFIG: {Path(yaml_path).name}", yaml_text))
+        f.write(block("TERMINAL OUTPUT", terminal_text))
+        f.write(block("WRITER.PY SOURCE", script_text))
+    print(f"  Provenance appended → {xdmf_path}")
+
+
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 def main(yaml_path: str) -> None:
-    cfg = load_config(yaml_path)
-    mt  = cfg["mesh_type"]
-    per = cfg["periodic"]
-    box = cfg["box_length"]
-    dim = 2 if mt in _2D_TYPES else 3
+    # Capture everything printed during this run (mirrored to the real
+    # terminal via _Tee) so it can be embedded in the .xdmf file afterwards.
+    _stdout_buf  = io.StringIO()
+    _real_stdout = sys.stdout
+    sys.stdout   = _Tee(_real_stdout, _stdout_buf)
 
-    _validate_obstacles(cfg.get("obstacles", []), box, dim, mt)
-    _validate_stretching(cfg["stretching_ratio"], cfg["stretching_symmetric"],
-                         cfg["n_divisions"], dim, mt)
+    try:
+        cfg = load_config(yaml_path)
+        mt  = cfg["mesh_type"]
+        per = cfg["periodic"]
+        box = cfg["box_length"]
+        dim = 2 if mt in _2D_TYPES else 3
 
-    print(f"Building '{mt}' mesh …")
+        _validate_obstacles(cfg.get("obstacles", []), box, dim, mt)
+        _validate_stretching(cfg["stretching_ratio"], cfg["stretching_symmetric"],
+                             cfg["n_divisions"], dim, mt)
 
-    edge_mk = None          # only set for 2-D types that provide it
-    obstacle_meta = []      # only set for 'triangle' / 'tetra'
+        print(f"Building '{mt}' mesh …")
 
-    # ── dispatch to builder ──────────────────────────────────────────────────
-    if mt == "triangle":
-        pts, cells, edges, pt_mk, edge_mk, obstacle_meta = _build_2d(cfg)
+        edge_mk = None          # only set for 2-D types that provide it
+        obstacle_meta = []      # only set for 'triangle' / 'tetra'
 
-    elif mt == "tetra":
-        pts, cells, edges, pt_mk, obstacle_meta = _build_3d(cfg)
+        # ── dispatch to builder ──────────────────────────────────────────────
+        if mt == "triangle":
+            pts, cells, edges, pt_mk, edge_mk, obstacle_meta = _build_2d(cfg)
 
-    elif mt == "gridsplit":
-        pts, cells = _build_gridsplit(cfg)
-        edges  = _edges_from_cells(cells)
-        pt_mk  = _pt_markers_2d(pts, *box)
-        edge_mk = _edge_markers_2d(pts, edges, *box)
+        elif mt == "tetra":
+            pts, cells, edges, pt_mk, obstacle_meta = _build_3d(cfg)
 
-    elif mt == "equilateral":
-        pts, cells = _build_equilateral(cfg)
-        edges  = _edges_from_cells(cells)
-        pt_mk  = _pt_markers_2d(pts, *box)
-        edge_mk = _edge_markers_2d(pts, edges, *box)
+        elif mt == "gridsplit":
+            pts, cells = _build_gridsplit(cfg)
+            edges  = _edges_from_cells(cells)
+            pt_mk  = _pt_markers_2d(pts, *box)
+            edge_mk = _edge_markers_2d(pts, edges, *box)
 
-    elif mt == "kuhn":
-        pts, cells = _build_kuhn(cfg)
-        edges  = _edges_from_cells(cells)
-        pt_mk  = _pt_markers_3d(pts, *box)
+        elif mt == "equilateral":
+            pts, cells = _build_equilateral(cfg)
+            edges  = _edges_from_cells(cells)
+            pt_mk  = _pt_markers_2d(pts, *box)
+            edge_mk = _edge_markers_2d(pts, edges, *box)
 
-    # ── pad 2-D coordinates to 3-D (z = 0) for uniform XDMF geometry ────────
-    if dim == 2:
-        pts3d      = np.column_stack([pts, np.zeros(len(pts))])
-        pts_for_per = pts              # use native 2-D coords for pairing
-    else:
-        pts3d = pts_for_per = pts
+        elif mt == "kuhn":
+            pts, cells = _build_kuhn(cfg)
+            edges  = _edges_from_cells(cells)
+            pt_mk  = _pt_markers_3d(pts, *box)
 
-    print("Computing cell-to-edge connectivity …")
-    c2e = _cell_to_edge(cells, edges, len(pts3d))
+        # ── pad 2-D coordinates to 3-D (z = 0) for uniform XDMF geometry ────
+        if dim == 2:
+            pts3d      = np.column_stack([pts, np.zeros(len(pts))])
+            pts_for_per = pts              # use native 2-D coords for pairing
+        else:
+            pts3d = pts_for_per = pts
 
-    print("Computing cell volumes …")
-    cell_vol = _cell_volumes(pts3d, cells, dim)
+        print("Computing cell-to-edge connectivity …")
+        c2e = _cell_to_edge(cells, edges, len(pts3d))
 
-    print("Computing vertex-to-cell connectivity …")
-    v2c_off, v2c_idx = _vertex_to_cell(len(pts3d), cells)
+        print("Computing cell volumes …")
+        cell_vol = _cell_volumes(pts3d, cells, dim)
 
-    print("Detecting periodic vertex pairs …")
-    per_pairs = _periodic_pairs(pts_for_per, box, per)
+        print("Computing vertex-to-cell connectivity …")
+        v2c_off, v2c_idx = _vertex_to_cell(len(pts3d), cells)
 
-    hdf5_path = str(Path(yaml_path).with_suffix(".h5"))
-    xdmf_path = str(Path(yaml_path).with_suffix(".xdmf"))
+        print("Detecting periodic vertex pairs …")
+        per_pairs = _periodic_pairs(pts_for_per, box, per)
 
-    write_hdf5(hdf5_path,
-               pts3d, cells, edges, c2e, cell_vol, v2c_off, v2c_idx, pt_mk, edge_mk,
-               per, per_pairs, box, dim, obstacle_meta)
-    write_xdmf(xdmf_path, hdf5_path,
-               len(pts3d), len(cells), len(edges), dim)
+        hdf5_path = str(Path(yaml_path).with_suffix(".h5"))
+        xdmf_path = str(Path(yaml_path).with_suffix(".xdmf"))
+
+        write_hdf5(hdf5_path,
+                   pts3d, cells, edges, c2e, cell_vol, v2c_off, v2c_idx, pt_mk, edge_mk,
+                   per, per_pairs, box, dim, obstacle_meta)
+        write_xdmf(xdmf_path, hdf5_path,
+                   len(pts3d), len(cells), len(edges), dim)
+
+        terminal_text = _stdout_buf.getvalue()
+    finally:
+        sys.stdout = _real_stdout   # always restore, even on error
+
+    # ── append provenance: YAML config + terminal output + writer.py source ──
+    yaml_text   = Path(yaml_path).read_text()
+    script_text = Path(__file__).read_text()
+    _append_provenance(xdmf_path, yaml_path, yaml_text, terminal_text, script_text)
 
 
 if __name__ == "__main__":
