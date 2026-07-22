@@ -1163,7 +1163,8 @@ def write_xdmf(xdmf_path: str, h5_path: str,
             '    <!-- Toggle visibility per grid in ParaView Pipeline Browser. -->\n'
             '    <Grid Name="MeshCollection" GridType="Collection"\n'
             '          CollectionType="Spatial">\n'
-            f'{cell_grid}\n{edge_grid}\n'
+            f'{cell_grid}\n'
+            f'<!-- {edge_grid} -->\n'
             '    </Grid>\n  </Domain>\n</Xdmf>\n')
     Path(xdmf_path).write_text(xdmf)
     print(f"  XDMF written → {xdmf_path}")
