@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-render_mesh.py — headless ParaView: load XDMF mesh(es), render "Surface With
+render.py — headless ParaView: load XDMF mesh(es), render "Surface With
 Edges" in solid color, save a PNG next to each .xdmf (same base name). Uses
 an isometric camera for 3-D meshes (nonzero z extent) and a top-down camera
 for flat 2-D meshes.
 
 Usage:
-    pvbatch --force-offscreen-rendering render_mesh.py mesh.xdmf [width] [height]
-    pvbatch --force-offscreen-rendering render_mesh.py some_folder/ [width] [height]
+    pvbatch --force-offscreen-rendering render.py mesh.xdmf [width] [height]
+    pvbatch --force-offscreen-rendering render.py some_folder/ [width] [height]
 
 If a folder is given, every '*.xdmf' file directly inside it is rendered,
 each to a .png sharing its own base name (e.g. meshes/kuhn.xdmf ->
@@ -121,7 +121,7 @@ def render_one(xdmf_path: Path, view, width: int, height: int) -> None:
 
 def main():
     if len(sys.argv) < 2:
-        sys.exit("Usage: pvbatch render_mesh.py mesh.xdmf|folder/ [width] [height]")
+        sys.exit("Usage: pvbatch render.py mesh.xdmf|folder/ [width] [height]")
 
     input_path = Path(sys.argv[1])
     width  = int(sys.argv[2]) if len(sys.argv) > 2 else 1600
