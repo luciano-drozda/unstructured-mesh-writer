@@ -1,8 +1,6 @@
 # unstructured-mesh-writer
 A writer of 2D Triangular and 3D Tetrahedral unstructured meshes
 
-p writer.py meshes/triangle.yaml; p writer.py meshes/tetra.yaml; p writer.py meshes/equilateral.yaml; p writer.py meshes/gridsplit.yaml; p writer.py meshes/kuhn.yaml; p writer.py meshes/obstacle_2d.yaml; p writer.py meshes/obstacle_3d.yaml; p writer.py meshes/channel_gridsplit.yaml; p writer.py meshes/duct_kuhn.yaml
-
 ## Gallery
 
 ### Triangle
