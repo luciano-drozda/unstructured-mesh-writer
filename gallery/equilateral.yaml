@@ -1,0 +1,4 @@
+mesh_type: equilateral
+box_length:  [1.0, 0.866]    # Ly ≈ Lx·√3/2 for equilateral interior tris
+n_divisions: [10, 10]        # ny must be even for y-periodic meshes
+periodic:    [false, false]

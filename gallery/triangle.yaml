@@ -1,0 +1,7 @@
+mesh_type: triangle
+box_length:  [1.0, 1.0]
+n_divisions: [10, 10]
+periodic:    [true, false]
+quality:
+  min_angle: 20.0
+  max_area:  ~
