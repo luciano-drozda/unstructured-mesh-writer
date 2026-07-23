@@ -21,17 +21,10 @@ from paraview.simple import *
 
 def configure_light_kit(view) -> None:
     """
-    Explicitly set the RenderView's Light Kit to match ParaView's GUI
-    defaults (Edit > Light Inspector). pvbatch/offscreen renders don't
-    always pick up the same light-kit initialization the interactive GUI
-    uses, which is why a script-driven render can come out noticeably
-    darker/flatter than what you see live in ParaView -- setting these
-    properties explicitly makes the batch output match.
-
-    Values below mirror the Light Inspector panel:
+    Values below mirror the Light Inspector panel in Paraview GUI:
       Key:  Warm 0.60  Int 0.75  Ele 50   Azi 10
       Fill: Warm 0.40  K:F 3.00  Ele -75  Azi -10
-      Back: Warm 0.50  K:B 1.00  Ele 0    Azi 110
+      Back: Warm 0.50  K:B 1.10  Ele 0    Azi 110
       Head: Warm 0.50  K:H 3.00
       Maintain Luminance: off
     """
@@ -48,7 +41,7 @@ def configure_light_kit(view) -> None:
     view.FillLightAzimuth   = -10
 
     view.BackLightWarmth    = 0.50
-    view.BackLightKBRatio   = 1.00
+    view.BackLightKBRatio   = 1.10
     view.BackLightElevation = 0
     view.BackLightAzimuth   = 110
 
