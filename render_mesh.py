@@ -57,6 +57,10 @@ def configure_light_kit(view) -> None:
 
     view.MaintainLuminance = 0
 
+    # Smooths jagged edges so mesh lines read as solid black rather than
+    # dithered/grayish -- improves perceived edge-vs-fill contrast.
+    view.UseFXAA = 1
+
 
 def render_one(xdmf_path: Path, view, width: int, height: int) -> None:
     png_path = xdmf_path.with_suffix(".png")
@@ -69,8 +73,20 @@ def render_one(xdmf_path: Path, view, width: int, height: int) -> None:
     ColorBy(disp, None)   # solid color, not colored by an array
     disp.AmbientColor = [0.8, 0.8, 0.85]
     disp.DiffuseColor = [0.8, 0.8, 0.85]
+
+    # Ambient/Diffuse balance: with only directional Light Kit lighting,
+    # faces angled away from the lights fall back almost entirely on the
+    # Ambient term, whose VTK default is 0.0 -- that's what makes
+    # off-axis faces look noticeably darker than a face pointing at the
+    # key light. Raising Ambient gives every face a brightness floor;
+    # lowering Diffuse slightly keeps some shading for depth without the
+    # harsh face-to-face contrast.
+    disp.Ambient  = 0.35
+    disp.Diffuse  = 0.65
+    disp.Specular = 0.0
+
     disp.EdgeColor = [0.0, 0.0, 0.0]
-    disp.LineWidth = 1.0
+    disp.LineWidth = 2.0   # thicker line reads as crisp black, not thin gray
     disp.SetScalarBarVisibility(view, False)
 
     # Decide 2-D vs 3-D from the data's actual bounding box (robust even if
