@@ -223,6 +223,24 @@ HDF5 layout
   /vertex_to_cell/
       offsets          int64    (n_pts+1,)      CSR row pointers
       indices          int64    (Σ degree,)     CSR cell-index data
+  /vertex_vol          float64  (n_pts,)        barycentric dual volume:
+                                                sum, over cells incident to
+                                                the vertex (per
+                                                /vertex_to_cell), of
+                                                cell_vol/(d+1) — i.e. each
+                                                cell's area/volume split
+                                                equally among its vertices
+                                                (1/3 for triangles, 1/4 for
+                                                tetrahedra). Periodicity IS
+                                                enforced: vertices linked via
+                                                /periodicity (x_pairs,
+                                                y_pairs, z_pairs) — including
+                                                transitively across more
+                                                than one direction, e.g. a
+                                                periodic-box corner — share
+                                                ONE combined value, the sum
+                                                of their individually
+                                                computed contributions.
   /boundary/
       point_markers    int32    (n_pts,)        0=interior; see convention
       edge_markers     int32    (n_edges,)      2-D only
@@ -1023,6 +1041,70 @@ def _cell_volumes(pts: np.ndarray, cells: np.ndarray, dim: int) -> np.ndarray:
         return np.abs(np.einsum('ij,ij->i', p1 - p0, cross)) / 6.0
 
 
+# ── Vertex volumes (barycentric dual, periodicity-enforced) ────────────────────
+
+def _vertex_volumes(cells: np.ndarray, cell_vol: np.ndarray, n_pts: int) -> np.ndarray:
+    """
+    Per-vertex barycentric dual volume: each cell's area/volume is split
+    equally among its own vertices via the barycenter -- 1/3 per vertex for
+    triangles, 1/4 for tetrahedra -- then summed over every cell incident to
+    a given vertex. Does NOT account for periodicity by itself; see
+    _enforce_periodicity_vertex_vol, applied afterwards in main().
+    """
+    n_per = cells.shape[1]                       # 3 (triangle) | 4 (tetra)
+    share = np.repeat(cell_vol, n_per) / n_per    # same order as cells.ravel()
+    return np.bincount(cells.ravel(), weights=share, minlength=n_pts)
+
+
+def _enforce_periodicity_vertex_vol(vertex_vol: np.ndarray, per_pairs: dict) -> np.ndarray:
+    """
+    Merge periodic vertex volumes so that vertices identified with each other
+    via /periodicity (x_pairs, y_pairs, z_pairs) share a single combined dual
+    volume -- the sum of their individually-computed /vertex_vol entries --
+    rather than each carrying only its own local share.
+
+    Uses a union-find over the vertices that actually appear in any pair
+    (most vertices are untouched, since only mesh boundary vertices can be
+    periodic). Pairs from different directions are merged transitively, so
+    a vertex periodic in more than one direction at once (e.g. a domain
+    corner under doubly/triply periodic boundaries) is correctly grouped
+    with all of its images, not just the ones sharing a single axis.
+    """
+    parent = {}
+
+    def find(x):
+        parent.setdefault(x, x)
+        root = x
+        while parent[root] != root:
+            root = parent[root]
+        while parent[x] != root:          # path compression
+            parent[x], x = root, parent[x]
+        return root
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    for arr in per_pairs.values():
+        for v_lo, v_hi in arr:
+            union(int(v_lo), int(v_hi))
+
+    if not parent:          # nothing periodic -- return unchanged
+        return vertex_vol
+
+    merged = vertex_vol.copy()
+    groups: dict = {}
+    for v in parent:
+        groups.setdefault(find(v), []).append(v)
+
+    for members in groups.values():
+        total = vertex_vol[members].sum()
+        merged[members] = total
+
+    return merged
+
+
 # ── Vertex-to-cell (CSR) ───────────────────────────────────────────────────────
 
 def _vertex_to_cell(n_pts: int, cells: np.ndarray):
@@ -1078,7 +1160,7 @@ def _periodic_pairs(pts: np.ndarray, box: list, periodic: list,
 
 def write_hdf5(h5_path: str,
                pts3d: np.ndarray, cells: np.ndarray, edges: np.ndarray,
-               c2e: np.ndarray, cell_vol: np.ndarray,
+               c2e: np.ndarray, cell_vol: np.ndarray, vertex_vol: np.ndarray,
                v2c_off: np.ndarray, v2c_idx: np.ndarray,
                pt_mk: np.ndarray, edge_mk,
                periodic: list, per_pairs: dict,
@@ -1107,6 +1189,12 @@ def write_hdf5(h5_path: str,
         g.attrs["description"] = "indices[offsets[v]:offsets[v+1]] = cells of vertex v"
         g.create_dataset("offsets", data=v2c_off, **kw)
         g.create_dataset("indices", data=v2c_idx, **kw)
+        d_vv = f.create_dataset("vertex_vol", data=vertex_vol, **kw)
+        d_vv.attrs["description"] = ("barycentric dual volume per vertex: sum "
+                                     "over incident cells of cell_vol/(d+1) "
+                                     "(1/3 tri, 1/4 tet); vertices linked via "
+                                     "/periodicity are merged to share one "
+                                     "combined value")
         b = f.create_group("boundary")
         b.create_dataset("point_markers", data=pt_mk, **kw)
         if edge_mk is not None:
@@ -1130,12 +1218,14 @@ def write_hdf5(h5_path: str,
                 else:
                     og.attrs["half_extents"] = list(obs["half_extents"])
     print(f"\n  HDF5 written → {h5_path}")
-    print(f"    vertices : {len(pts3d):>10,}")
-    print(f"    cells    : {len(cells):>10,}")
-    print(f"    edges    : {len(edges):>10,}")
-    print(f"    cell_vol : min={cell_vol.min():.6g}  max={cell_vol.max():.6g}")
+    print(f"    vertices  : {len(pts3d):>10,}")
+    print(f"    cells     : {len(cells):>10,}")
+    print(f"    edges     : {len(edges):>10,}")
+    print(f"    cell_vol  : min={cell_vol.min():.6g}  max={cell_vol.max():.6g}")
+    print(f"    vertex_vol: min={vertex_vol.min():.6g}  max={vertex_vol.max():.6g}"
+          f"  sum={vertex_vol.sum():.6g}")
     if obstacles:
-        print(f"    obstacles: {len(obstacles):>10,}")
+        print(f"    obstacles : {len(obstacles):>10,}")
 
 
 # ── XDMF writer ────────────────────────────────────────────────────────────────
@@ -1145,8 +1235,12 @@ def write_xdmf(xdmf_path: str, h5_path: str,
     """
     Two grids in a Spatial Collection:
       'cells' — volume mesh (Triangle / Tetrahedron topology), with
-                BoundaryMarker (point data) and CellVolume (cell data)
-      'edges' — wire skeleton (Polyline topology)
+                BoundaryMarker + VertexVolume (point data) and CellVolume
+                (cell data)
+      'edges' — wire skeleton (Polyline topology); commented out by default
+                (see below) to avoid interior mesh edges rendering as clutter
+                on top of the 'cells' surface -- uncomment the XML block in
+                the .xdmf file if you want to inspect connectivity directly.
     Toggle visibility per grid in ParaView's Pipeline Browser.
     Obstacle holes need no special handling here — they simply have no
     cells, so ParaView renders the cavity automatically; obstacle boundary
@@ -1171,6 +1265,9 @@ def write_xdmf(xdmf_path: str, h5_path: str,
         f'      </Geometry>\n'
         f'      <Attribute Name="BoundaryMarker" AttributeType="Scalar" Center="Node">\n'
         f'        {di(f"{n_pts}", "/boundary/point_markers")}\n'
+        f'      </Attribute>\n'
+        f'      <Attribute Name="VertexVolume" AttributeType="Scalar" Center="Node">\n'
+        f'        {di(f"{n_pts}", "/vertex_vol", "Float", 8)}\n'
         f'      </Attribute>\n'
         f'      <Attribute Name="CellVolume" AttributeType="Scalar" Center="Cell">\n'
         f'        {di(f"{n_cells}", "/cell_vol", "Float", 8)}\n'
@@ -1232,7 +1329,6 @@ def _append_provenance(xdmf_path: str, yaml_path: str, yaml_text: str,
         return (f"\n\n<!-- ===== {label} =====\n"
                 f"{_xml_comment_safe(content)}\n"
                 f"===== end {label} ===== -->\n")
-
     with open(xdmf_path, "a") as f:
         f.write("\n")
         f.write(block(f"YAML CONFIG: {Path(yaml_path).name}", yaml_text))
@@ -1249,7 +1345,6 @@ def main(yaml_path: str) -> None:
     _stdout_buf  = io.StringIO()
     _real_stdout = sys.stdout
     sys.stdout   = _Tee(_real_stdout, _stdout_buf)
-
     try:
         cfg = load_config(yaml_path)
         mt  = cfg["mesh_type"]
@@ -1269,22 +1364,18 @@ def main(yaml_path: str) -> None:
         # ── dispatch to builder ──────────────────────────────────────────────
         if mt == "triangle":
             pts, cells, edges, pt_mk, edge_mk, obstacle_meta = _build_2d(cfg)
-
         elif mt == "tetra":
             pts, cells, edges, pt_mk, obstacle_meta = _build_3d(cfg)
-
         elif mt == "gridsplit":
             pts, cells = _build_gridsplit(cfg)
             edges  = _edges_from_cells(cells)
             pt_mk  = _pt_markers_2d(pts, *box)
             edge_mk = _edge_markers_2d(pts, edges, *box)
-
         elif mt == "equilateral":
             pts, cells = _build_equilateral(cfg)
             edges  = _edges_from_cells(cells)
             pt_mk  = _pt_markers_2d(pts, *box)
             edge_mk = _edge_markers_2d(pts, edges, *box)
-
         elif mt == "kuhn":
             pts, cells = _build_kuhn(cfg)
             edges  = _edges_from_cells(cells)
@@ -1303,17 +1394,24 @@ def main(yaml_path: str) -> None:
         print("Computing cell volumes …")
         cell_vol = _cell_volumes(pts3d, cells, dim)
 
+        print("Computing vertex volumes …")
+        vertex_vol = _vertex_volumes(cells, cell_vol, len(pts3d))
+
         print("Computing vertex-to-cell connectivity …")
         v2c_off, v2c_idx = _vertex_to_cell(len(pts3d), cells)
 
         print("Detecting periodic vertex pairs …")
         per_pairs = _periodic_pairs(pts_for_per, box, per)
 
+        print("Enforcing periodicity on vertex volumes …")
+        vertex_vol = _enforce_periodicity_vertex_vol(vertex_vol, per_pairs)
+
         hdf5_path = str(Path(yaml_path).with_suffix(".h5"))
         xdmf_path = str(Path(yaml_path).with_suffix(".xdmf"))
 
         write_hdf5(hdf5_path,
-                   pts3d, cells, edges, c2e, cell_vol, v2c_off, v2c_idx, pt_mk, edge_mk,
+                   pts3d, cells, edges, c2e, cell_vol, vertex_vol,
+                   v2c_off, v2c_idx, pt_mk, edge_mk,
                    per, per_pairs, box, dim, obstacle_meta)
         write_xdmf(xdmf_path, hdf5_path,
                    len(pts3d), len(cells), len(edges), dim)
