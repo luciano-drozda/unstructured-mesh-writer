@@ -1,6 +1,11 @@
-mesh_type: kuhn
-box_length:  [1.0, 1.0, 1.0]
-n_divisions: [3, 3, 3]          # → 6·nx·ny·nz tetrahedra
-# diagonal:    alternate_layers   # or: fixed
-diagonal:    flip_y   # default. Also: flip_x | flip_y | flip_z | alternate_layers
-periodic:    [true, true, false]
+mesh_type: kuhn                # Kuhn / Freudenthal 6-tet-per-cube decomposition (no external lib)
+box_length:  [1.0, 1.0, 1.0]  # [Lx, Ly, Lz]
+n_divisions: [3, 3, 3]        # [nx, ny, nz] cells per direction → 6·nx·ny·nz tetrahedra
+
+# ── OPTIONAL keys ─────────────────────────────────────────────────
+periodic: [true, true, false]  # OPTIONAL — default [false, false, false]
+
+diagonal: flip_y               # OPTIONAL — default main; main | flip_x | flip_y | flip_z | alternate_layers
+
+stretching_ratio:     [1.0, 1.2, 1.0]     # OPTIONAL — default [1.0, 1.0, 1.0]; per-axis geometric ratio
+stretching_symmetric: [false, true, false]  # OPTIONAL — default [false, false, false]; per-axis symmetry flag
