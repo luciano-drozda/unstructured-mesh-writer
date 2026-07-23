@@ -1,3 +1,8 @@
+# PNG files
+# but those in some folder named 'gallery'
+*.png
+!**/gallery/**/*.png
+
 # HDF5 and XMF files
 *.h5
 *.xdmf
