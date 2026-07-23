@@ -1,6 +1,0 @@
-mesh_type: equilateral         # Offset-row triangular lattice (no external lib)
-box_length:  [1.0, 0.866]    # [Lx, Ly]; Ly ≈ Lx·√3/2 for equilateral interior tris
-n_divisions: [10, 10]        # [nx, ny]; ny must be even for y-periodic meshes
-
-# ── OPTIONAL keys ─────────────────────────────────────────────────
-periodic: [false, false]      # OPTIONAL — default [false, false]

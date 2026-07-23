@@ -1,0 +1,10 @@
+mesh_type: triangle
+box_length: [1.0, 1.0]
+n_divisions: [6, 6]
+periodic: [false, false]
+quality:
+  min_angle: 20.0
+obstacles:
+  - shape: circle
+    center: [0.5, 0.5]
+    radius: 0.15

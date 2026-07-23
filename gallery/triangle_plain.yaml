@@ -1,0 +1,4 @@
+mesh_type: triangle
+box_length: [1.0, 1.0]
+n_divisions: [6, 6]
+periodic: [false, false]
