@@ -1,5 +1,11 @@
-mesh_type: gridsplit
-box_length:  [1.0, 1.0]
-n_divisions: [9, 9]      # nx, ny cells → 2·nx·ny triangles
-diagonal:    alternate     # or: backslash | slash
-periodic:    [true, true]
+mesh_type: gridsplit           # Cartesian grid split into right triangles (no external lib)
+box_length:  [1.0, 1.0]        # [Lx, Ly]
+n_divisions: [9, 9]            # [nx, ny] cells per direction → 2·nx·ny triangles
+
+# ── OPTIONAL keys ─────────────────────────────────────────────────
+periodic: [true, true]         # OPTIONAL — default [false, false]
+
+diagonal: alternate            # OPTIONAL — default backslash; backslash | slash | alternate
+
+stretching_ratio:     [1.0, 1.2]     # OPTIONAL — default [1.0, 1.0]; per-axis geometric ratio
+stretching_symmetric: [false, true]   # OPTIONAL — default [false, false]; per-axis symmetry flag
