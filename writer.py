@@ -15,7 +15,15 @@ Five mesh types are supported:
 
 Usage
 -----
-    python writer.py config.yaml
+    python writer.py config.yaml      # process a single config
+    python writer.py configs_dir/     # process every '*.yaml' directly
+                                       # inside configs_dir (non-recursive);
+                                       # each gets its own .h5/.xdmf pair,
+                                       # named and located per 'Output
+                                       # files' below. A failure in one
+                                       # config is reported and does not
+                                       # stop the remaining ones from being
+                                       # processed.
 
 YAML keys
 ---------
@@ -1426,7 +1434,45 @@ def main(yaml_path: str) -> None:
     _append_provenance(xdmf_path, yaml_path, yaml_text, terminal_text, script_text)
 
 
+def _process_yaml_or_dir(path_str: str) -> None:
+    """
+    CLI entry dispatcher: accepts either a single YAML config file or a
+    directory. For a directory, every '*.yaml' file directly inside it
+    (non-recursive) is processed in turn via main(), each producing its own
+    '.h5'/'.xdmf' pair (see 'Output files' in the module docstring). A
+    failure in one config is reported and does not stop the remaining
+    configs in the directory from being processed; the process exits with
+    a nonzero status if any config failed.
+    """
+    path = Path(path_str)
+
+    if path.is_dir():
+        yaml_files = sorted(path.glob("*.yaml"))
+        if not yaml_files:
+            sys.exit(f"No .yaml files found in directory: {path}")
+        print(f"Found {len(yaml_files)} YAML config(s) in {path}\n")
+
+        failures = []
+        for i, yf in enumerate(yaml_files, 1):
+            print(f"[{i}/{len(yaml_files)}] {yf.name}")
+            try:
+                main(str(yf))
+            except Exception as exc:
+                print(f"  [error] {yf.name}: {exc}")
+                failures.append(yf.name)
+            print()
+
+        if failures:
+            sys.exit(f"Completed with {len(failures)} failure(s): "
+                     f"{', '.join(failures)}")
+        return
+
+    if not path.is_file():
+        sys.exit(f"Path not found: {path}")
+    main(str(path))
+
+
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        sys.exit(f"Usage: {sys.argv[0]} config.yaml")
-    main(sys.argv[1])
+        sys.exit(f"Usage: {sys.argv[0]} config.yaml | config_dir/")
+    _process_yaml_or_dir(sys.argv[1])
