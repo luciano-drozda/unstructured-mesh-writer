@@ -256,6 +256,7 @@ HDF5 layout
       Attrs: periodic_x, periodic_y [, periodic_z]   bool
       x_pairs          int64    (n, 2)          [v_lo, v_hi]
       y_pairs / z_pairs                         idem
+      all_pairs                                 idem
   /obstacles/                                   present only if obstacles given
       Attrs: count
       obstacle_<idx>/  Attrs: shape, marker, center, radius | half_extents
@@ -1164,6 +1165,56 @@ def _periodic_pairs(pts: np.ndarray, box: list, periodic: list,
     return pairs
 
 
+def _all_periodic_pairs(per_pairs: dict) -> np.ndarray:
+    """
+    Full transitive closure of periodic identification, expressed as pairs.
+    Groups vertices via union-find over per_pairs (x_pairs/y_pairs/z_pairs
+    combined), then emits every unique 2-combination within each group --
+    e.g. a triply-periodic domain corner with 8 images yields C(8,2) = 28
+    pairs, not just the 3 direct per-axis edges _periodic_pairs produced.
+    Only vertices that appear in at least one input pair are considered; everything else is an implicit singleton and contributes no rows.
+    Returns an (n, 2) int64 array [v_a, v_b] with v_a < v_b in each row,
+    rows sorted lexicographically, no duplicate pairs.
+    """
+    parent = {}
+    def find(x):
+        parent.setdefault(x, x)
+        root = x
+        while parent[root] != root:
+            root = parent[root]
+        while parent[x] != root:          # path compression
+            parent[x], x = root, parent[x]
+        return root
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    for arr in per_pairs.values():
+        for v_lo, v_hi in arr:
+            union(int(v_lo), int(v_hi))
+
+    if not parent:
+        return np.empty((0, 2), dtype=np.int64)
+
+    groups: dict = {}
+    for v in parent:
+        groups.setdefault(find(v), []).append(v)
+
+    all_pairs = []
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        all_pairs.extend(combinations(sorted(members), 2))
+
+    if not all_pairs:
+        return np.empty((0, 2), dtype=np.int64)
+
+    out = np.array(all_pairs, dtype=np.int64)
+    order = np.lexsort((out[:, 1], out[:, 0]))   # sort by (v_a, then v_b)
+    return out[order]
+
+
 # ── HDF5 writer ────────────────────────────────────────────────────────────────
 
 def write_hdf5(h5_path: str,
@@ -1171,7 +1222,7 @@ def write_hdf5(h5_path: str,
                c2e: np.ndarray, cell_vol: np.ndarray, vertex_vol: np.ndarray,
                v2c_off: np.ndarray, v2c_idx: np.ndarray,
                pt_mk: np.ndarray, edge_mk,
-               periodic: list, per_pairs: dict,
+               periodic: list, per_pairs: dict, all_pairs: np.ndarray,
                box: list, dim: int, obstacles=None) -> None:
     obstacles = obstacles or []
     kw = dict(compression="gzip", compression_opts=4)
@@ -1213,6 +1264,7 @@ def write_hdf5(h5_path: str,
         for d_name, arr in per_pairs.items():
             p.attrs[f"periodic_{d_name}"] = True
             if len(arr): p.create_dataset(f"{d_name}_pairs", data=arr, **kw)
+        if len(all_pairs): p.create_dataset(f"all_pairs", data=all_pairs, **kw)
         if obstacles:
             o = f.create_group("obstacles")
             o.attrs["count"] = len(obstacles)
@@ -1410,6 +1462,7 @@ def main(yaml_path: str) -> None:
 
         print("Detecting periodic vertex pairs …")
         per_pairs = _periodic_pairs(pts_for_per, box, per)
+        all_pairs = _all_periodic_pairs(per_pairs)
 
         print("Enforcing periodicity on vertex volumes …")
         vertex_vol = _enforce_periodicity_vertex_vol(vertex_vol, per_pairs)
@@ -1420,7 +1473,7 @@ def main(yaml_path: str) -> None:
         write_hdf5(hdf5_path,
                    pts3d, cells, edges, c2e, cell_vol, vertex_vol,
                    v2c_off, v2c_idx, pt_mk, edge_mk,
-                   per, per_pairs, box, dim, obstacle_meta)
+                   per, per_pairs, all_pairs, box, dim, obstacle_meta)
         write_xdmf(xdmf_path, hdf5_path,
                    len(pts3d), len(cells), len(edges), dim)
 
