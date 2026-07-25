@@ -130,6 +130,16 @@ Notes on structured types
       decomposition and its conformity/periodicity properties are otherwise
       unaffected.
 
+      Every output tetrahedron is consistently oriented: vertices are
+      ordered so that det[v2-v1, v3-v1, v4-v1] > 0 for all cells,
+      regardless of cube position or 'diagonal' choice. Without this fix,
+      exactly half of the 6 tets per cube come out with the opposite
+      handedness from the other half — an inherent property of enumerating
+      all 6 axis-order permutations, not a bug tied to any one 'diagonal'
+      mode — which silently breaks any downstream computation that assumes
+      uniform orientation (e.g. signed-volume-based nodal normals, FEM
+      Jacobians).
+
 Grid stretching (gridsplit / kuhn only)
 ------------------------------------------
   stretching_ratio     : per-axis list, e.g. [1.0, 1.0] (2-D) or
@@ -294,6 +304,16 @@ _STRETCH_TYPES = {"gridsplit", "kuhn"}
 
 # Pre-computed Kuhn permutations (used in _build_kuhn)
 _KUHN_PERMS = list(_iperms([0, 1, 2]))   # 6 permutations of {x, y, z}
+
+def _perm_parity(p) -> int:
+    """+1 for an even permutation of (0,1,2), -1 for odd (by inversion count)."""
+    p = list(p)
+    inversions = sum(1 for a in range(len(p)) for b in range(a+1, len(p)) if p[a] > p[b])
+    return 1 if inversions % 2 == 0 else -1
+
+# Parity of each _KUHN_PERMS entry -- used by _build_kuhn to keep every
+# output tetrahedron consistently oriented (see docstring note under 'kuhn').
+_KUHN_PERM_PARITY = [_perm_parity(p) for p in _KUHN_PERMS]
 
 
 # ── stdout capture (provenance) ─────────────────────────────────────────────────
@@ -897,12 +917,18 @@ def _build_kuhn(cfg: dict):
         for j in range(ny):
             for i in range(nx):
                 o = list(start_offset(i, j, k))
-                for perm in _KUHN_PERMS:
+                parity_o = 1 if sum(o) % 2 == 0 else -1
+                for perm_idx, perm in enumerate(_KUHN_PERMS):
                     cur = list(o)
                     tet = [vid(i+cur[0], j+cur[1], k+cur[2])]
                     for axis in perm:
                         cur[axis] = 1 - cur[axis]
                         tet.append(vid(i+cur[0], j+cur[1], k+cur[2]))
+                    # Keep every tet's signed volume det[v1-v0,v2-v0,v3-v0]
+                    # positive: sign = (-1)^popcount(o) * sign(perm); swap the
+                    # last two vertices whenever that product is negative.
+                    if parity_o * _KUHN_PERM_PARITY[perm_idx] < 0:
+                        tet[2], tet[3] = tet[3], tet[2]
                     cells.append(tet)
 
     return pts, np.array(cells, dtype=np.int64)
