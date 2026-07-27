@@ -1628,9 +1628,9 @@ def main(yaml_path: str) -> None:
         print("Computing cell volumes …")
         cell_vol = _cell_volumes(pts3d, cells, dim)
 
-        # print("Checking cell orientation consistency …")
-        # signed_measure = _signed_cell_measure(pts3d, cells, dim)
-        # _check_cell_orientation(signed_measure, mt)
+        print("Checking cell orientation consistency …")
+        signed_measure = _signed_cell_measure(pts3d, cells, dim)
+        _check_cell_orientation(signed_measure, mt)
 
         print("Computing per-cell vertex normals …")
         cell_vertex_normal = _cell_vertex_normals(pts3d, cells, dim)
