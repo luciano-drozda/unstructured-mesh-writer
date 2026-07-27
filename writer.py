@@ -82,6 +82,9 @@ Notes on structured types
       grid, so cells are NO LONGER congruent; the structured tensor-product
       topology (and hence periodicity/diagonal handling) is unaffected.
 
+      All cells are consistently CCW-oriented (positive signed area)
+      regardless of 'diagonal' choice.
+
   equilateral
       Even rows: nx+1 points at x = 0, dx, ..., Lx
       Odd  rows: nx+2 points at x = 0, dx/2, ..., Lx  (boundary points added)
@@ -131,14 +134,13 @@ Notes on structured types
       unaffected.
 
       Every output tetrahedron is consistently oriented: vertices are
-      ordered so that det[v2-v1, v3-v1, v4-v1] > 0 for all cells,
-      regardless of cube position or 'diagonal' choice. Without this fix,
-      exactly half of the 6 tets per cube come out with the opposite
-      handedness from the other half — an inherent property of enumerating
-      all 6 axis-order permutations, not a bug tied to any one 'diagonal'
-      mode — which silently breaks any downstream computation that assumes
-      uniform orientation (e.g. signed-volume-based nodal normals, FEM
-      Jacobians).
+      ordered so that det[v2-v1, v3-v1, v4-v1] < 0 for all cells,
+      regardless of cube position or 'diagonal' choice (chosen to match the
+      convention expected by /cell_vertex_normal's tetrahedron formula, see
+      'Vertex normals' below). Without this fix, exactly half of the 6 tets
+      per cube come out with the opposite handedness from the other half —
+      an inherent property of enumerating all 6 axis-order permutations,
+      not a bug tied to any one 'diagonal' mode.
 
 Grid stretching (gridsplit / kuhn only)
 ------------------------------------------
@@ -175,6 +177,40 @@ Grid stretching (gridsplit / kuhn only)
   matching) established by n_divisions/diagonal — only the physical
   spacing dx/dy/dz becomes non-uniform, so cells are no longer congruent
   once stretching is enabled on an axis.
+
+Vertex normals
+--------------
+  Every mesh_type computes /cell_vertex_normal, a per-cell, per-local-vertex
+  vector quantity with EXACTLY the same shape as /cell_to_vertex plus a
+  trailing size-3 component axis: (n_cells, d+1, 3) (z=0 for 2-D). This is
+  NOT scattered/summed onto global vertices and periodicity is NOT applied
+  to it (there is no per-global-vertex reduction here at all) -- it is the
+  direct per-cell analogue of a classical cell-vertex finite-volume "nodal
+  normal" construction (the skx/sky/skz arrays some solvers compute
+  themselves from cell_to_vertex, here precomputed and exported instead).
+
+  For each cell, one vector S_k per local vertex k, satisfying
+  sum_k S_k = 0 for that cell (a standard identity for the boundary of a
+  closed simplex):
+    3-D (tetra, local vertices 0,1,2,3; a=v1-v0, b=v2-v0, c=v3-v0):
+        S_3 = 0.5*(a x b)   S_1 = 0.5*(b x c)   S_2 = 0.5*(c x a)
+        S_0 = -(S_1 + S_2 + S_3)
+      i.e. S_k is the area vector of the triangular face opposite vertex
+      k, for a tet ordered per each mesh_type's own orientation convention
+      (see the 'kuhn' note above for that type's choice).
+    2-D (triangle, local vertices 0,1,2):
+        S_k = Rot90(v_(k+2) - v_(k+1)),  Rot90(x,y) = (y,-x)
+      i.e. S_k is the outward length-vector of the edge opposite vertex k,
+      for a CCW-ordered triangle.
+
+  Correctness depends entirely on every cell of a given mesh sharing the
+  same orientation (same sign of signed area/volume); a mixed-orientation
+  mesh would give some cells' S_k vectors the opposite handedness from
+  others. This is checked for every mesh_type after generation
+  (_check_cell_orientation) and reported as a [warn] if violated -- this
+  is exactly the failure mode 'kuhn' used to have (see above) before its
+  per-tet orientation fix, and the check guards against the same class of
+  bug in any mesh_type, not just kuhn.
 
 Obstacles (triangle / tetra only)
 ----------------------------------
@@ -237,6 +273,16 @@ HDF5 layout
                                                        (1,2),(1,3),(2,3)
   /cell_vol            float64  (n_cells,)      triangle area (2-D) |
                                                 tetra volume (3-D)
+  /cell_vertex_normal  float64  (n_cells, d+1, 3)  d=3 (tri) | 4 (tet);
+                                                z=0 for 2-D. One vector per
+                                                (cell, local vertex),
+                                                shaped exactly like
+                                                /cell_to_vertex plus a
+                                                trailing 3-component axis.
+                                                NOT scattered onto global
+                                                vertices; periodicity is
+                                                NOT applied. See 'Vertex
+                                                normals' above.
   /vertex_to_vertex    int64    (n_edges, 2)    all unique sorted edges
   /vertex_to_cell/
       offsets          int64    (n_pts+1,)      CSR row pointers
@@ -741,6 +787,9 @@ def _build_gridsplit(cfg: dict):
         Per-axis [rx, ry] / [sym_x, sym_y], default [1.0, 1.0] / [false, false].
         Replaces the uniform np.linspace grid along each axis with a
         geometrically stretched one; see _stretched_coords.
+
+    All emitted triangles are consistently CCW-oriented (positive signed
+    area) for every 'diagonal' choice.
     """
     Lx, Ly = cfg["box_length"]; nx, ny = cfg["n_divisions"]
     diagonal = cfg.get("diagonal", "backslash")
@@ -877,6 +926,11 @@ def _build_kuhn(cfg: dict):
         np.linspace grid along each axis with a geometrically stretched
         one; see _stretched_coords. Breaks the 'congruent Sommerville tet'
         guarantee on any axis where it is enabled.
+
+    Orientation: every emitted tet is normalized (via a conditional vertex
+    swap keyed on cube-offset parity and permutation parity) so that
+    det[v2-v1, v3-v1, v4-v1] < 0 for ALL cells -- see the module
+    docstring's 'kuhn' note for why this sign was chosen.
     """
     Lx, Ly, Lz = cfg["box_length"]; nx, ny, nz = cfg["n_divisions"]
 
@@ -924,10 +978,10 @@ def _build_kuhn(cfg: dict):
                     for axis in perm:
                         cur[axis] = 1 - cur[axis]
                         tet.append(vid(i+cur[0], j+cur[1], k+cur[2]))
-                    # Keep every tet's signed volume det[v1-v0,v2-v0,v3-v0]
-                    # positive: sign = (-1)^popcount(o) * sign(perm); swap the
-                    # last two vertices whenever that product is negative.
-                    if parity_o * _KUHN_PERM_PARITY[perm_idx] < 0:
+                    # Force det[v1-v0,v2-v0,v3-v0] < 0 for every tet: natural
+                    # sign = parity_o * perm_parity; swap the last two
+                    # vertices whenever that product would be positive.
+                    if parity_o * _KUHN_PERM_PARITY[perm_idx] > 0:
                         tet[2], tet[3] = tet[3], tet[2]
                     cells.append(tet)
 
@@ -1076,6 +1130,47 @@ def _cell_volumes(pts: np.ndarray, cells: np.ndarray, dim: int) -> np.ndarray:
         return np.abs(np.einsum('ij,ij->i', p1 - p0, cross)) / 6.0
 
 
+def _signed_cell_measure(pts: np.ndarray, cells: np.ndarray, dim: int) -> np.ndarray:
+    """
+    Signed counterpart of _cell_volumes (no abs()): signed area (2-D,
+    shoelace) or signed volume (3-D, scalar triple product). Used only to
+    check that every cell in a mesh shares the same orientation (see
+    _check_cell_orientation) before that orientation is relied upon by
+    _cell_vertex_normals -- unlike /cell_vol, this is never written to the
+    HDF5 file.
+    """
+    if dim == 2:
+        p0, p1, p2 = pts[cells[:, 0], :2], pts[cells[:, 1], :2], pts[cells[:, 2], :2]
+        return 0.5 * (
+            p0[:, 0] * (p1[:, 1] - p2[:, 1]) +
+            p1[:, 0] * (p2[:, 1] - p0[:, 1]) +
+            p2[:, 0] * (p0[:, 1] - p1[:, 1])
+        )
+    else:
+        p0 = pts[cells[:, 0]]; p1 = pts[cells[:, 1]]
+        p2 = pts[cells[:, 2]]; p3 = pts[cells[:, 3]]
+        cross = np.cross(p2 - p0, p3 - p0)
+        return np.einsum('ij,ij->i', p1 - p0, cross) / 6.0
+
+
+def _check_cell_orientation(signed_measure: np.ndarray, mesh_type: str) -> None:
+    """
+    Print a [warn] if a mesh's cells are not all consistently oriented (all
+    positive or all negative signed area/volume). /cell_vertex_normal's
+    direction depends on that ordering; a mixed-sign mesh would give some
+    cells' vectors the opposite handedness from others -- this is exactly
+    the failure mode 'kuhn' used to have before its per-tet orientation fix
+    (see module docstring), and this check guards against the same class
+    of bug in any mesh_type.
+    """
+    n_pos = int(np.sum(signed_measure > 0))
+    n_neg = int(np.sum(signed_measure < 0))
+    if n_pos and n_neg:
+        print(f"  [warn] {mesh_type}: cells are not consistently oriented "
+              f"({n_pos} positive, {n_neg} negative signed measure) -- "
+              f"cell_vertex_normal may be inconsistent across cells")
+
+
 # ── Vertex volumes (barycentric dual, periodicity-enforced) ────────────────────
 
 def _vertex_volumes(cells: np.ndarray, cell_vol: np.ndarray, n_pts: int) -> np.ndarray:
@@ -1084,26 +1179,25 @@ def _vertex_volumes(cells: np.ndarray, cell_vol: np.ndarray, n_pts: int) -> np.n
     equally among its own vertices via the barycenter -- 1/3 per vertex for
     triangles, 1/4 for tetrahedra -- then summed over every cell incident to
     a given vertex. Does NOT account for periodicity by itself; see
-    _enforce_periodicity_vertex_vol, applied afterwards in main().
+    _enforce_periodicity_vertex_field, applied afterwards in main().
     """
     n_per = cells.shape[1]                       # 3 (triangle) | 4 (tetra)
     share = np.repeat(cell_vol, n_per) / n_per    # same order as cells.ravel()
     return np.bincount(cells.ravel(), weights=share, minlength=n_pts)
 
 
-def _enforce_periodicity_vertex_vol(vertex_vol: np.ndarray, per_pairs: dict) -> np.ndarray:
+def _enforce_periodicity_vertex_field(vertex_field: np.ndarray, per_pairs: dict) -> np.ndarray:
     """
-    Merge periodic vertex volumes so that vertices identified with each other
-    via /periodicity (x_pairs, y_pairs, z_pairs) share a single combined dual
-    volume -- the sum of their individually-computed /vertex_vol entries --
-    rather than each carrying only its own local share.
+    Merge a per-vertex quantity (any array whose first axis is n_pts,
+    e.g. the scalar /vertex_vol) across vertices identified with each
+    other via /periodicity (x_pairs, y_pairs, z_pairs), including
+    transitively across more than one direction (e.g. a periodic-box
+    corner). Every vertex in a periodic group ends up holding the SUM of
+    the group's individually-computed contributions.
 
     Uses a union-find over the vertices that actually appear in any pair
     (most vertices are untouched, since only mesh boundary vertices can be
-    periodic). Pairs from different directions are merged transitively, so
-    a vertex periodic in more than one direction at once (e.g. a domain
-    corner under doubly/triply periodic boundaries) is correctly grouped
-    with all of its images, not just the ones sharing a single axis.
+    periodic).
     """
     parent = {}
 
@@ -1126,18 +1220,57 @@ def _enforce_periodicity_vertex_vol(vertex_vol: np.ndarray, per_pairs: dict) -> 
             union(int(v_lo), int(v_hi))
 
     if not parent:          # nothing periodic -- return unchanged
-        return vertex_vol
+        return vertex_field
 
-    merged = vertex_vol.copy()
+    merged = vertex_field.copy()
     groups: dict = {}
     for v in parent:
         groups.setdefault(find(v), []).append(v)
 
     for members in groups.values():
-        total = vertex_vol[members].sum()
+        total = vertex_field[members].sum(axis=0)
         merged[members] = total
 
     return merged
+
+
+# ── Vertex normals (per-cell, per-local-vertex; NOT scattered to vertices) ──────
+
+def _cell_vertex_normals(pts: np.ndarray, cells: np.ndarray, dim: int) -> np.ndarray:
+    """
+    Per-cell, per-local-vertex dual-normal contribution vectors S_k
+    (k = local vertex index), satisfying sum_k S_k = 0 for every cell -- the
+    standard identity for the boundary of a closed simplex. See the module
+    docstring's 'Vertex normals' section for the derivation and formulas.
+
+    This is exported AS-IS (shape (n_cells, dim+1, 3), matching
+    /cell_to_vertex's (n_cells, dim+1) plus a trailing 3-component axis) --
+    it is NOT scattered/summed onto global vertices, and periodicity does
+    not apply to it.
+    """
+    n_cells = len(cells)
+    S = np.zeros((n_cells, dim + 1, 3), dtype=np.float64)
+
+    if dim == 2:
+        v0, v1, v2 = pts[cells[:, 0]], pts[cells[:, 1]], pts[cells[:, 2]]
+        def rot90(v):
+            out = np.zeros_like(v)
+            out[:, 0] = v[:, 1]
+            out[:, 1] = -v[:, 0]
+            return out
+        S[:, 0] = rot90(v2 - v1)
+        S[:, 1] = rot90(v0 - v2)
+        S[:, 2] = rot90(v1 - v0)
+    else:
+        v0, v1, v2, v3 = (pts[cells[:, 0]], pts[cells[:, 1]],
+                          pts[cells[:, 2]], pts[cells[:, 3]])
+        a, b, c = v1 - v0, v2 - v0, v3 - v0
+        S[:, 3] = 0.5 * np.cross(a, b)
+        S[:, 1] = 0.5 * np.cross(b, c)
+        S[:, 2] = 0.5 * np.cross(c, a)
+        S[:, 0] = -(S[:, 1] + S[:, 2] + S[:, 3])
+
+    return S
 
 
 # ── Vertex-to-cell (CSR) ───────────────────────────────────────────────────────
@@ -1245,7 +1378,8 @@ def _all_periodic_pairs(per_pairs: dict) -> np.ndarray:
 
 def write_hdf5(h5_path: str,
                pts3d: np.ndarray, cells: np.ndarray, edges: np.ndarray,
-               c2e: np.ndarray, cell_vol: np.ndarray, vertex_vol: np.ndarray,
+               c2e: np.ndarray, cell_vol: np.ndarray, cell_vertex_normal: np.ndarray,
+               vertex_vol: np.ndarray,
                v2c_off: np.ndarray, v2c_idx: np.ndarray,
                pt_mk: np.ndarray, edge_mk,
                periodic: list, per_pairs: dict, all_pairs: np.ndarray,
@@ -1268,6 +1402,14 @@ def write_hdf5(h5_path: str,
         d_vol.attrs["description"] = ("triangle area (2-D) or tetrahedron "
                                       "volume (3-D) of each cell, same order "
                                       "as /cell_to_vertex")
+        d_cvn = f.create_dataset("cell_vertex_normal", data=cell_vertex_normal, **kw)
+        d_cvn.attrs["description"] = ("per-cell, per-local-vertex dual-normal "
+                                      "vector S_k (sum_k S_k = 0 per cell); "
+                                      "shape matches /cell_to_vertex plus a "
+                                      "trailing 3-component axis (z=0 for "
+                                      "2-D); NOT scattered to global vertices, "
+                                      "periodicity NOT applied -- see 'Vertex "
+                                      "normals' in the module docstring")
         f.create_dataset("vertex_to_vertex", data=edges, **kw)
         g = f.create_group("vertex_to_cell")
         g.attrs["format"] = "CSR"
@@ -1304,14 +1446,16 @@ def write_hdf5(h5_path: str,
                 else:
                     og.attrs["half_extents"] = list(obs["half_extents"])
     print(f"\n  HDF5 written → {h5_path}")
-    print(f"    vertices  : {len(pts3d):>10,}")
-    print(f"    cells     : {len(cells):>10,}")
-    print(f"    edges     : {len(edges):>10,}")
-    print(f"    cell_vol  : min={cell_vol.min():.6g}  max={cell_vol.max():.6g}")
-    print(f"    vertex_vol: min={vertex_vol.min():.6g}  max={vertex_vol.max():.6g}"
-          f"  sum={vertex_vol.sum():.6g}")
+    print(f"    vertices          : {len(pts3d):>10,}")
+    print(f"    cells             : {len(cells):>10,}")
+    print(f"    edges             : {len(edges):>10,}")
+    print(f"    cell_vol          : min={cell_vol.min():.6g}  max={cell_vol.max():.6g}")
+    cvn_mag = np.linalg.norm(cell_vertex_normal, axis=2)
+    print(f"    cell_vertex_normal: |S_k| max={cvn_mag.max():.6g}")
+    print(f"    vertex_vol        : min={vertex_vol.min():.6g}  "
+          f"max={vertex_vol.max():.6g}  sum={vertex_vol.sum():.6g}")
     if obstacles:
-        print(f"    obstacles : {len(obstacles):>10,}")
+        print(f"    obstacles         : {len(obstacles):>10,}")
 
 
 # ── XDMF writer ────────────────────────────────────────────────────────────────
@@ -1322,7 +1466,11 @@ def write_xdmf(xdmf_path: str, h5_path: str,
     Two grids in a Spatial Collection:
       'cells' — volume mesh (Triangle / Tetrahedron topology), with
                 BoundaryMarker + VertexVolume (point data) and CellVolume
-                (cell data)
+                (cell data). /cell_vertex_normal is NOT exposed here: it is
+                a per-(cell, local vertex) quantity, not a simple per-node
+                or per-cell field, so it has no direct XDMF/ParaView
+                attribute representation -- read it straight from the HDF5
+                file instead (see the module docstring's 'Vertex normals').
       'edges' — wire skeleton (Polyline topology); commented out by default
                 (see below) to avoid interior mesh edges rendering as clutter
                 on top of the 'cells' surface -- uncomment the XML block in
@@ -1480,6 +1628,13 @@ def main(yaml_path: str) -> None:
         print("Computing cell volumes …")
         cell_vol = _cell_volumes(pts3d, cells, dim)
 
+        # print("Checking cell orientation consistency …")
+        # signed_measure = _signed_cell_measure(pts3d, cells, dim)
+        # _check_cell_orientation(signed_measure, mt)
+
+        print("Computing per-cell vertex normals …")
+        cell_vertex_normal = _cell_vertex_normals(pts3d, cells, dim)
+
         print("Computing vertex volumes …")
         vertex_vol = _vertex_volumes(cells, cell_vol, len(pts3d))
 
@@ -1491,13 +1646,13 @@ def main(yaml_path: str) -> None:
         all_pairs = _all_periodic_pairs(per_pairs)
 
         print("Enforcing periodicity on vertex volumes …")
-        vertex_vol = _enforce_periodicity_vertex_vol(vertex_vol, per_pairs)
+        vertex_vol = _enforce_periodicity_vertex_field(vertex_vol, per_pairs)
 
         hdf5_path = str(Path(yaml_path).with_suffix(".h5"))
         xdmf_path = str(Path(yaml_path).with_suffix(".xdmf"))
 
         write_hdf5(hdf5_path,
-                   pts3d, cells, edges, c2e, cell_vol, vertex_vol,
+                   pts3d, cells, edges, c2e, cell_vol, cell_vertex_normal, vertex_vol,
                    v2c_off, v2c_idx, pt_mk, edge_mk,
                    per, per_pairs, all_pairs, box, dim, obstacle_meta)
         write_xdmf(xdmf_path, hdf5_path,
