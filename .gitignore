@@ -1,3 +1,7 @@
+# Triangle and Tetrahedral filtered out versions
+writer_tri.py
+writer_tetra.py
+
 # DS Store
 .DS_Store
 
