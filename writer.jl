@@ -6469,6 +6469,27 @@ function _refine_mesh3(res, fixedDiagonal::Int = 0)
     return resF, parents
 end
 
+# Return the exact volume of the obstacles and the share that the mesh
+# captures. The share is the volume that the mesh removes from the box,
+# divided by the exact obstacle volume. A rectangle or a box gives 1. A
+# circle or a sphere gives less than 1, because the mesh holds a polygon
+# or a polyhedron inside the shape. The record fields follow
+# _obstacle_record2 and _obstacle_record3.
+function _obstacle_capture(obstacles, box::Tuple, dim::Int, totalVolume::Float64)
+    exact = 0.0
+    for obs in obstacles
+        if obs.shape == "circle"
+            exact += pi * obs.radius^2
+        elseif obs.shape == "sphere"
+            exact += 4.0 / 3.0 * pi * obs.radius^3
+        else
+            exact += 2.0^dim * prod(obs.half_extents)
+        end
+    end
+    boxVolume = prod(box[1:dim])
+    return exact, (boxVolume - totalVolume) / exact
+end
+
 # Check the config value of the key hierarchy. Return nothing when the
 # key is absent. Otherwise return a NamedTuple with the fields levels,
 # boundary and maxCells.
@@ -6802,6 +6823,30 @@ function load_mesh(path::AbstractString)
     end
 end
 
+# Read all levels of a hierarchy that main wrote. The argument is the path
+# of the YAML config, as for main. The function returns a vector of the
+# load_mesh results, with level 0 (the coarsest) first. It stops with an
+# error when a level file is missing or does not belong to the hierarchy.
+function load_hierarchy(yamlPath::AbstractString)
+    stem = replace(yamlPath, r"\.ya?ml$" => "")
+    file0 = "$(stem)_L0.h5"
+    isfile(file0) || error("$file0 not found. Run writer.jl on a config with the key hierarchy first.")
+    m0 = load_mesh(file0)
+    m0.hierarchy === nothing && error("$file0 has no hierarchy group.")
+    nLevels = m0.hierarchy.nLevels
+    levels = NamedTuple[m0]
+    for k in 1:nLevels - 1
+        file = "$(stem)_L$k.h5"
+        isfile(file) || error("$file not found. The hierarchy has $nLevels levels.")
+        m = load_mesh(file)
+        if m.hierarchy === nothing || m.hierarchy.level != k || m.hierarchy.nLevels != nLevels
+            error("$file does not belong to the hierarchy of $file0.")
+        end
+        push!(levels, m)
+    end
+    return levels
+end
+
 # Return the value of the HDF5 attribute mesh_type. It names the cell
 # type, as writer.py does: triangle for every 2-D mesh and tetra for
 # every 3-D mesh. The config key mesh_type records how the mesh was made.
@@ -7117,6 +7162,14 @@ function _write_level(logBuf::IOBuffer, yamlPath::AbstractString, stem::Abstract
     end
     for c in 1:nCells
         cellVol[c] = abs(cellVol[c])
+    end
+    if !isempty(res.obstacles)
+        exactObs, share = _obstacle_capture(res.obstacles, box, dim, sum(cellVol))
+        _log(logBuf, "  obstacle volume captured by the mesh: $(round(100 * share, digits = 2)) percent of $(round(exactObs, sigdigits = 6))")
+        if hier !== nothing && hier.level == 0 && share < 0.95
+            _log(logBuf, "  [warn] hierarchy: the coarsest mesh captures $(round(100 * share, digits = 1)) percent of the obstacle volume. " *
+                         "Every level keeps this boundary. Use a smaller mesh size on the obstacles.")
+        end
     end
 
     _log(logBuf, "Computing per-cell vertex normals …")

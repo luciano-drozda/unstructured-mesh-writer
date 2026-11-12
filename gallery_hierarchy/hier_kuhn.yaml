@@ -1,0 +1,7 @@
+mesh_type: kuhn
+box_length: [1.0, 1.0, 1.0]
+n_divisions: [2, 2, 2]
+periodic: [false, false, false]
+diagonal: main
+hierarchy:
+  levels: 3

@@ -1,0 +1,12 @@
+mesh_type: tetra
+box_length: [1.0, 1.0, 1.0]
+periodic: [false, false, false]
+mesh_options:
+  mesh_size: 0.5
+  mesh_size_obstacle: 0.1
+obstacles:
+  - shape: sphere
+    center: [0.5, 0.5, 0.5]
+    radius: 0.2
+hierarchy:
+  levels: 3

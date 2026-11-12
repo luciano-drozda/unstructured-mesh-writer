@@ -1,0 +1,13 @@
+mesh_type: triangle
+box_length: [1.0, 1.0]
+periodic: [false, false]
+mesh_options:
+  mesh_size: 0.3
+  mesh_size_obstacle: 0.06
+  min_angle: 20.0
+obstacles:
+  - shape: circle
+    center: [0.5, 0.5]
+    radius: 0.15
+hierarchy:
+  levels: 3

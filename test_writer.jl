@@ -1828,6 +1828,67 @@ if haveIO
         check("hierarchy: the config of a plain mesh has hierarchy nothing", W.load_config(plain)["hierarchy"] === nothing)
     end
 
+    # The share of the obstacle volume that the mesh captures.
+    let
+        cap = WCore._obstacle_capture
+        circle = [(shape = "circle", center = (5.0, 5.0), radius = 1.0, marker = 10)]
+        # A regular 12-gon inside the unit circle has the area 3.
+        exact, share = cap(circle, (10.0, 10.0), 2, 100.0 - 3.0)
+        check("obstacle capture: a 12-gon captures 3/pi of the circle", abs(exact - pi) < 1e-12 && abs(share - 3 / pi) < 1e-12)
+        rect = [(shape = "rectangle", center = (5.0, 5.0), half_extents = (1.0, 2.0), marker = 10)]
+        exact, share = cap(rect, (10.0, 10.0), 2, 100.0 - 8.0)
+        check("obstacle capture: a rectangle is captured completely", abs(exact - 8) < 1e-12 && abs(share - 1) < 1e-12)
+        # A regular icosahedron with circumradius 1 has the volume 5/12 (3 + sqrt 5) a^3.
+        a = 4 / sqrt(10 + 2 * sqrt(5))
+        sph = [(shape = "sphere", center = (5.0, 5.0, 5.0), radius = 1.0, marker = 100)]
+        exact, share = cap(sph, (10.0, 10.0, 10.0), 3, 1000.0 - 5 / 12 * (3 + sqrt(5)) * a^3)
+        check("obstacle capture: an icosahedron captures about 0.6055 of the sphere", abs(exact - 4pi / 3) < 1e-12 && abs(share - 0.6055) < 1e-3)
+        bx = [(shape = "box", center = (5.0, 5.0, 5.0), half_extents = (1.0, 1.0, 2.0), marker = 100)]
+        exact, share = cap(bx, (10.0, 10.0, 10.0), 3, 1000.0 - 16.0)
+        check("obstacle capture: a box is captured completely", abs(exact - 16) < 1e-12 && abs(share - 1) < 1e-12)
+    end
+    function log_of(name, yamlText)
+        yaml = joinpath(hierDir, "$name.yaml")
+        write(yaml, yamlText)
+        logFile = joinpath(hierDir, "$name.log")
+        open(logFile, "w") do io
+            redirect_stdout(io) do
+                W.main(yaml)
+            end
+        end
+        return read(logFile, String)
+    end
+    let
+        circle(hObs, extra) = "mesh_type: triangle\nbox_length: [1.0, 1.0]\nmesh_options:\n  mesh_size: 0.3\n  mesh_size_obstacle: $hObs\n" *
+                              "obstacles:\n  - shape: circle\n    center: [0.5, 0.5]\n    radius: 0.15\n" * extra
+        coarse = log_of("w_coarse", circle(0.3, "hierarchy:\n  levels: 2\n"))
+        check("resolution log: a coarse circle in a hierarchy gives a [warn] hierarchy line", occursin("[warn] hierarchy:", coarse))
+        check("resolution log: the line names the captured share", occursin("obstacle volume captured by the mesh:", coarse))
+        fine = log_of("w_fine", circle(0.05, "hierarchy:\n  levels: 2\n"))
+        check("resolution log: a well-resolved circle gives no [warn] hierarchy line", !occursin("[warn] hierarchy:", fine))
+        plainLog = log_of("w_plain", circle(0.3, ""))
+        check("resolution log: a mesh without hierarchy logs the share and no hierarchy warning",
+              occursin("obstacle volume captured by the mesh:", plainLog) && !occursin("[warn] hierarchy:", plainLog))
+        check("resolution log: a mesh without obstacles has no capture line",
+              !occursin("obstacle volume captured", log_of("w_noobs", "mesh_type: gridsplit\nbox_length: [1.0, 1.0]\nn_divisions: [2, 2]\nhierarchy:\n  levels: 2\n")))
+    end
+
+    # load_hierarchy.
+    let
+        lv = W.load_hierarchy(joinpath(hierDir, "h_triangle_circle.yaml"))
+        check("load_hierarchy: it returns the 3 levels, coarsest first",
+              length(lv) == 3 && [m.hierarchy.level for m in lv] == [0, 1, 2] && lv[1].pts == hierLevels["h_triangle_circle"][1].pts)
+        check("load_hierarchy: a missing hierarchy is an error", occursin("not found", errmsg(() -> W.load_hierarchy(joinpath(hierDir, "nothing_here.yaml")))))
+        lone = joinpath(hierDir, "lone_L0.h5")
+        cp(joinpath(hierDir, "h_gridsplit_alt_L0.h5"), lone; force = true)
+        check("load_hierarchy: a missing level file is an error", occursin("lone_L1.h5 not found", errmsg(() -> W.load_hierarchy(joinpath(hierDir, "lone.yaml")))))
+        cp(joinpath(hierDir, "h_gridsplit_alt_L2.h5"), joinpath(hierDir, "lone_L1.h5"); force = true)
+        check("load_hierarchy: a file of the wrong level is an error", occursin("does not belong", errmsg(() -> W.load_hierarchy(joinpath(hierDir, "lone.yaml")))))
+        check("load_hierarchy: a plain mesh file is an error",
+              occursin("no hierarchy group", errmsg(() -> (cp(joinpath(hierDir, "h_plain.h5"), joinpath(hierDir, "plainmesh_L0.h5"); force = true);
+                                                            W.load_hierarchy(joinpath(hierDir, "plainmesh.yaml"))))))
+    end
+
     # Config errors.
     let
         ro = WCore._resolve_hierarchy_options
@@ -1850,6 +1911,28 @@ if haveIO
         end)
         check("hierarchy: a size over max_cells stops with an error that names the limit", occursin("max_cells is 1000", msg))
         check("hierarchy: the error writes no file", !isfile(joinpath(hierDir, "h_big_L0.h5")))
+    end
+
+    # The stored folder gallery_hierarchy/ holds the configs of the hierarchy
+    # examples and one PNG for each level. Every config must load, and each
+    # level needs its image.
+    let
+        hierGallery = joinpath(dirname(writerPath), "gallery_hierarchy")
+        if isdir(hierGallery)
+            names = sort([splitext(f)[1] for f in readdir(hierGallery) if endswith(f, ".yaml")])
+            check("gallery_hierarchy: the folder holds the 4 example configs", length(names) == 4)
+            for n in names
+                cfg = try
+                    W.load_config(joinpath(hierGallery, "$n.yaml"))
+                catch
+                    nothing
+                end
+                check("gallery_hierarchy: $n loads and has the key hierarchy", cfg !== nothing && cfg["hierarchy"] !== nothing)
+                cfg === nothing && continue
+                check("gallery_hierarchy: $n has one PNG for each of its $(cfg["hierarchy"].levels) levels",
+                      all(k -> isfile(joinpath(hierGallery, "$(n)_L$(k).png")), 0:cfg["hierarchy"].levels - 1))
+            end
+        end
     end
 
     # Regression against the reference outputs of the old files

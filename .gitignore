@@ -10,6 +10,7 @@ writer_tetra.py
 *.png
 !**/gallery/**/*.png
 !**/gallery_julia/**/*.png
+!**/gallery_hierarchy/**/*.png
 
 # HDF5 and XMF files
 *.h5

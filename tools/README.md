@@ -12,3 +12,4 @@
 - `check_style.py`, `dup_scan.py`, `check_ste.py`: checks of `writer.jl` (house style of the kernels,
   duplicate names, long sentences in comments). Usage: `python3 tools/check_style.py writer.jl`.
 - `quality_stats.py FOLDER`: dihedral statistics of every tetrahedral `.h5` file in a folder. It works for the files of both writers.
+- `hierarchy_quality.jl`: compares the diagonal rules of the 3-D hierarchy refinement (max-min and the 3 fixed diagonals) on some meshes. For each level it prints the dihedral angles, the radius-edge ratio and the mean-ratio shape. Usage: `julia --project=. tools/hierarchy_quality.jl`. A compare script for `writer.py` is not needed: `writer.py` has no hierarchy, so `compare_schema_py.py` skips the level files.
