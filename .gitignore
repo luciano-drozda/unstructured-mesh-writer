@@ -9,6 +9,7 @@ writer_tetra.py
 # but those in some folder named 'gallery'
 *.png
 !**/gallery/**/*.png
+!**/gallery_julia/**/*.png
 
 # HDF5 and XMF files
 *.h5

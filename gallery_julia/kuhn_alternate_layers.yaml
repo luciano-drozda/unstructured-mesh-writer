@@ -1,0 +1,5 @@
+mesh_type: kuhn
+box_length: [1.0, 1.0, 1.0]
+n_divisions: [3, 3, 3]
+periodic: [false, false, false]
+diagonal: alternate_layers

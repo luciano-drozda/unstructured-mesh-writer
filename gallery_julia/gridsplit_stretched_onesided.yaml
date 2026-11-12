@@ -1,0 +1,6 @@
+mesh_type: gridsplit
+box_length: [1.0, 1.0]
+n_divisions: [16, 16]
+periodic: [false, false]
+stretching_ratio: [1.0, 1.5]
+stretching_symmetric: [false, false]

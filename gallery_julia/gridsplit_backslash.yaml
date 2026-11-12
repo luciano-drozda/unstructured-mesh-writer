@@ -1,0 +1,5 @@
+mesh_type: gridsplit
+box_length: [1.0, 1.0]
+n_divisions: [4, 4]
+periodic: [false, false]
+diagonal: backslash

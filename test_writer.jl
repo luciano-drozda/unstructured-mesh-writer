@@ -1330,6 +1330,24 @@ if haveIO
         check("gallery $name: no vertex is unused", length(unique(vec(cells))) == nv)
     end
 
+    # The stored folder gallery_julia/ holds one YAML config and one PNG per
+    # gallery case. Every config must load, and the names must match the cases above.
+    storedDir = joinpath(dirname(writerPath), "gallery_julia")
+    if isdir(storedDir)
+        storedNames = sort([splitext(f)[1] for f in readdir(storedDir) if endswith(f, ".yaml")])
+        check("gallery_julia: the YAML names are the gallery case names", storedNames == sort([c[1] for c in galleryCases]))
+        check("gallery_julia: every YAML has a PNG", all(n -> isfile(joinpath(storedDir, "$n.png")), storedNames))
+        okLoad = true
+        for n in storedNames
+            try
+                W.load_config(joinpath(storedDir, "$n.yaml"))
+            catch
+                okLoad = false
+            end
+        end
+        check("gallery_julia: every YAML loads as a config", okLoad)
+    end
+
     # Regression against the reference outputs of the old files
     # (section 12.2.1 of the plan), when the folder is given.
     refDir = get(ENV, "WRITER_REF_DIR", "")

@@ -1,0 +1,6 @@
+mesh_type: kuhn
+box_length: [1.0, 1.0, 1.0]
+n_divisions: [12, 12, 12]
+periodic: [false, false, false]
+stretching_ratio: [1.0, 1.5, 1.0]
+stretching_symmetric: [false, true, false]

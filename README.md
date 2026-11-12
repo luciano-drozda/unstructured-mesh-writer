@@ -84,3 +84,44 @@ Make such a folder with `tools/run_writer_on_configs.sh writer.jl <folder>`. See
 | ![kuhn_flip_y](gallery/kuhn_flip_y.png)<br><b><span style="font-size: 1.1em;">kuhn_flip_y</span></b> | ![kuhn_flip_z](gallery/kuhn_flip_z.png)<br><b><span style="font-size: 1.1em;">kuhn_flip_z</span></b> |
 | ![kuhn_alternate_layers](gallery/kuhn_alternate_layers.png)<br><b><span style="font-size: 1.1em;">kuhn_alternate_layers</span></b> | ![kuhn_stretched_onesided](gallery/kuhn_stretched_onesided.png)<br><b><span style="font-size: 1.1em;">kuhn_stretched_onesided</span></b> |
 | ![kuhn_stretched_symmetric](gallery/kuhn_stretched_symmetric.png)<br><b><span style="font-size: 1.1em;">kuhn_stretched_symmetric</span></b> | |
+
+## Gallery (writer.jl)
+
+The folder `gallery_julia/` holds the same cases for `writer.jl`: the YAML configs and the images that `render.py` makes from the files `writer.jl` writes.
+The structured configs (`equilateral`, `gridsplit`, `kuhn`) are the same as in `gallery/`, and so are their meshes. The `triangle` and `tetra` configs use `mesh_options` (`mesh_size`) because `writer.jl` has its own mesher, so those meshes differ from the Python ones.
+
+### Triangle
+
+| | |
+|---|---|
+| ![triangle_plain](gallery_julia/triangle_plain.png)<br><b><span style="font-size: 1.1em;">triangle_plain</span></b> | ![triangle_circle](gallery_julia/triangle_circle.png)<br><b><span style="font-size: 1.1em;">triangle_circle</span></b> |
+| ![triangle_rectangle](gallery_julia/triangle_rectangle.png)<br><b><span style="font-size: 1.1em;">triangle_rectangle</span></b> |  |
+
+### Tetra
+
+| | |
+|---|---|
+| ![tetra_plain](gallery_julia/tetra_plain.png)<br><b><span style="font-size: 1.1em;">tetra_plain</span></b> |  |
+
+### Equilateral
+
+| | |
+|---|---|
+| ![equilateral_plain](gallery_julia/equilateral_plain.png)<br><b><span style="font-size: 1.1em;">equilateral_plain</span></b> |  |
+
+### Gridsplit
+
+| | |
+|---|---|
+| ![gridsplit_backslash](gallery_julia/gridsplit_backslash.png)<br><b><span style="font-size: 1.1em;">gridsplit_backslash</span></b> | ![gridsplit_slash](gallery_julia/gridsplit_slash.png)<br><b><span style="font-size: 1.1em;">gridsplit_slash</span></b> |
+| ![gridsplit_alternate](gallery_julia/gridsplit_alternate.png)<br><b><span style="font-size: 1.1em;">gridsplit_alternate</span></b> | ![gridsplit_stretched_onesided](gallery_julia/gridsplit_stretched_onesided.png)<br><b><span style="font-size: 1.1em;">gridsplit_stretched_onesided</span></b> |
+| ![gridsplit_stretched_symmetric](gallery_julia/gridsplit_stretched_symmetric.png)<br><b><span style="font-size: 1.1em;">gridsplit_stretched_symmetric</span></b> |  |
+
+### Kuhn
+
+| | |
+|---|---|
+| ![kuhn_main](gallery_julia/kuhn_main.png)<br><b><span style="font-size: 1.1em;">kuhn_main</span></b> | ![kuhn_flip_x](gallery_julia/kuhn_flip_x.png)<br><b><span style="font-size: 1.1em;">kuhn_flip_x</span></b> |
+| ![kuhn_flip_y](gallery_julia/kuhn_flip_y.png)<br><b><span style="font-size: 1.1em;">kuhn_flip_y</span></b> | ![kuhn_flip_z](gallery_julia/kuhn_flip_z.png)<br><b><span style="font-size: 1.1em;">kuhn_flip_z</span></b> |
+| ![kuhn_alternate_layers](gallery_julia/kuhn_alternate_layers.png)<br><b><span style="font-size: 1.1em;">kuhn_alternate_layers</span></b> | ![kuhn_stretched_onesided](gallery_julia/kuhn_stretched_onesided.png)<br><b><span style="font-size: 1.1em;">kuhn_stretched_onesided</span></b> |
+| ![kuhn_stretched_symmetric](gallery_julia/kuhn_stretched_symmetric.png)<br><b><span style="font-size: 1.1em;">kuhn_stretched_symmetric</span></b> |  |
