@@ -754,6 +754,74 @@ check("equilateral with odd rows: hashed pairs equal the brute-force pairs", ppN
 
 # ── Equilateral lattice, diagonals, layout (version 2) ───────────────────
 
+println("Cell quality kernels")
+# One triangle: right isosceles, then equilateral.
+let
+    pts = [0.0 0.0; 1.0 0.0; 0.0 1.0; 0.5 sqrt(3) / 2]
+    cells = [1 2 3; 1 2 4]
+    mn = zeros(2); mx = zeros(2)
+    WCore.triangle_angle_kernel(cells, pts, 2, mn, mx)
+    check("triangle angles: right isosceles 45 and 90", isapprox(mn[1], 45.0; atol = 1e-12) && isapprox(mx[1], 90.0; atol = 1e-12))
+    check("triangle angles: equilateral 60 and 60", isapprox(mn[2], 60.0; atol = 1e-12) && isapprox(mx[2], 60.0; atol = 1e-12))
+    cells2 = [1 3 2]
+    WCore.triangle_angle_kernel(cells2, pts, 1, mn, mx)
+    check("triangle angles: the orientation does not matter", isapprox(mn[1], 45.0; atol = 1e-12) && isapprox(mx[1], 90.0; atol = 1e-12))
+end
+# One regular tetrahedron: the dihedral angle is acos(1/3) and the ratio is sqrt(6)/4.
+let
+    pts = [1.0 1.0 1.0; 1.0 -1.0 -1.0; -1.0 1.0 -1.0; -1.0 -1.0 1.0]
+    for (label, cells) in (("one orientation", [1 2 3 4]), ("the other orientation", [1 2 4 3]))
+        mn = zeros(1); mx = zeros(1); ra = zeros(1)
+        WCore.tetra_quality_kernel(cells, pts, 1, mn, mx, ra)
+        want = acos(1 / 3) * 180 / pi
+        check("regular tetrahedron ($label): both dihedral extremes are $(round(want; digits = 4))",
+              isapprox(mn[1], want; atol = 1e-9) && isapprox(mx[1], want; atol = 1e-9))
+        check("regular tetrahedron ($label): the radius-edge ratio is sqrt(6)/4", isapprox(ra[1], sqrt(6) / 4; atol = 1e-12))
+    end
+end
+# One corner tetrahedron of a cube (the Kuhn shape): 45, 60 and 90 degrees, ratio sqrt(3)/2.
+let
+    pts = [0.0 0.0 0.0; 1.0 0.0 0.0; 1.0 1.0 0.0; 1.0 1.0 1.0]
+    mn = zeros(1); mx = zeros(1); ra = zeros(1)
+    WCore.tetra_quality_kernel([1 2 3 4], pts, 1, mn, mx, ra)
+    check("Kuhn tetrahedron: dihedral 45 to 90 degrees", isapprox(mn[1], 45.0; atol = 1e-9) && isapprox(mx[1], 90.0; atol = 1e-9))
+    check("Kuhn tetrahedron: the radius-edge ratio is sqrt(3)/2", isapprox(ra[1], sqrt(3) / 2; atol = 1e-12))
+end
+# Random tetrahedra against a direct computation: the circumcenter from a linear
+# system, the dihedral angle from the projections of two vertices on a plane
+# normal to the edge.
+let
+    rng = MersenneTwister(7)
+    n = 200
+    pts = rand(rng, n * 4, 3)
+    cells = reshape(collect(1:n * 4), 4, n)'
+    cells = Matrix{Int}(cells)
+    mn = zeros(n); mx = zeros(n); ra = zeros(n)
+    WCore.tetra_quality_kernel(cells, pts, n, mn, mx, ra)
+    okMin = true; okMax = true; okRatio = true
+    for c in 1:n
+        X = pts[cells[c, :], :]
+        A = 2 .* (X[2:4, :] .- X[1:1, :])
+        rhs = vec(sum(X[2:4, :] .^ 2 .- X[1:1, :] .^ 2; dims = 2))
+        radius = norm(A \ rhs - X[1, :])
+        shortest = minimum(norm(X[i, :] - X[j, :]) for i in 1:4 for j in i + 1:4)
+        angles = Float64[]
+        for i in 1:4, j in i + 1:4
+            k, l = [m for m in 1:4 if m != i && m != j]
+            e = (X[j, :] - X[i, :]) / norm(X[j, :] - X[i, :])
+            u = X[k, :] - X[i, :]; u -= e * dot(u, e)
+            v = X[l, :] - X[i, :]; v -= e * dot(v, e)
+            push!(angles, acos(clamp(dot(u, v) / (norm(u) * norm(v)), -1, 1)) * 180 / pi)
+        end
+        okMin &= isapprox(mn[c], minimum(angles); rtol = 1e-8)
+        okMax &= isapprox(mx[c], maximum(angles); rtol = 1e-8)
+        okRatio &= isapprox(ra[c], radius / shortest; rtol = 1e-8)
+    end
+    check("random tetrahedra: the smallest dihedral angle matches a direct computation", okMin)
+    check("random tetrahedra: the largest dihedral angle matches a direct computation", okMax)
+    check("random tetrahedra: the radius-edge ratio matches a direct computation", okRatio)
+end
+
 println("Equilateral lattice and 2-D diagonals")
 let
     h = sqrt(3.0) / 2
@@ -1049,6 +1117,19 @@ if haveIO
         check("$name: all_pairs exists exactly when an axis is periodic", haskey(d1, "/periodicity/all_pairs") == periodicAll)
         check("$name: mesh_type attribute is $h5type", d1["@/mesh_type"] == h5type)
         check("$name: schema_version attribute is 1", d1["@/schema_version"] == 1)
+        qNames = dim == 2 ? ["min_angle_deg", "max_angle_deg"] : ["min_dihedral_deg", "max_dihedral_deg", "max_radius_edge_ratio"]
+        qOther = dim == 2 ? ["min_dihedral_deg", "max_dihedral_deg", "max_radius_edge_ratio"] : ["min_angle_deg", "max_angle_deg"]
+        check("$name: the quality attributes $(join(qNames, ", ")) exist", all(q -> haskey(d1, "@/$q"), qNames))
+        check("$name: the quality attributes of the other dimension are absent", !any(q -> haskey(d1, "@/$q"), qOther))
+        if dim == 2
+            check("$name: the angles are in (0, 180) and ordered",
+                  0 < d1["@/min_angle_deg"] <= 60 + 1e-9 && 60 - 1e-9 <= d1["@/max_angle_deg"] < 180)
+        else
+            check("$name: the dihedral angles and the ratio are sensible",
+                  0 < d1["@/min_dihedral_deg"] <= acos(1 / 3) * 180 / pi + 1e-9 &&
+                  acos(1 / 3) * 180 / pi - 1e-9 <= d1["@/max_dihedral_deg"] < 180 &&
+                  d1["@/max_radius_edge_ratio"] >= sqrt(6) / 4 - 1e-9)
+        end
         check("$name: dimension attribute is $dim", d1["@/dimension"] == dim)
         check("$name: box_length attribute has $dim entries", length(d1["@/box_length"]) == dim)
         check("$name: edge markers exist only for a 2-D mesh", haskey(d1, "/boundary/edge_markers") == (dim == 2))

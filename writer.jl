@@ -784,6 +784,109 @@ function cell_vertex_normal_3d_kernel(cells, pts, n, normal)
     return nothing
 end
 
+# triangle_angle_kernel(cells, pts, n, minAng, maxAng)
+#
+# Fill minAng and maxAng with the smallest and the largest interior angle
+# of each triangle, in degrees. The law of cosines gives each angle from
+# the squared edge lengths. The cosine falls as the angle grows, so the
+# largest cosine gives the smallest angle and the smallest cosine gives
+# the largest angle. Only two acos calls are needed per cell.
+#
+# cells: n-by-3 cell-to-vertex array
+# pts: point array, x then y
+# n: number of cells
+# minAng: length-n output array, smallest angle of each cell
+# maxAng: length-n output array, largest angle of each cell
+function triangle_angle_kernel(cells, pts, n, minAng, maxAng)
+    for c = 1:n
+        i0 = cells[c, 1]; i1 = cells[c, 2]; i2 = cells[c, 3]
+        x0 = pts[i0, 1]; y0 = pts[i0, 2]
+        x1 = pts[i1, 1]; y1 = pts[i1, 2]
+        x2 = pts[i2, 1]; y2 = pts[i2, 2]
+        # squared length of the edge opposite each vertex
+        l0 = (x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1)
+        l1 = (x0 - x2) * (x0 - x2) + (y0 - y2) * (y0 - y2)
+        l2 = (x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0)
+        cos0 = (l1 + l2 - l0) / (2.0 * sqrt(l1 * l2))
+        cos1 = (l0 + l2 - l1) / (2.0 * sqrt(l0 * l2))
+        cos2 = (l0 + l1 - l2) / (2.0 * sqrt(l0 * l1))
+        cosMax = min(1.0, max(cos0, max(cos1, cos2)))
+        cosMin = max(-1.0, min(cos0, min(cos1, cos2)))
+        minAng[c] = 57.29577951308232 * acos(cosMax)
+        maxAng[c] = 57.29577951308232 * acos(cosMin)
+    end
+    return nothing
+end
+
+# tetra_quality_kernel(cells, pts, n, minDih, maxDih, ratio)
+#
+# Fill minDih and maxDih with the smallest and the largest dihedral angle
+# of each tetrahedron, in degrees. Fill ratio with the circumradius
+# divided by the shortest edge.
+# S_k and S_l are the outward area vectors of the two faces that share
+# one edge. The dihedral angle at that edge follows from
+# cos(angle) = -(S_k . S_l) / (|S_k| |S_l|).
+# The 6 pairs of faces are the 6 edges.
+# The circumradius is R = |a2 (b x c) + b2 (c x a) + c2 (a x b)|
+# / (2 |a . (b x c)|).
+# Here a, b, c are the edge vectors from vertex 0.
+# a2, b2, c2 are their squared lengths.
+#
+# cells: n-by-4 cell-to-vertex array
+# pts: point array, x, y, z
+# n: number of cells
+# minDih: length-n output array, smallest dihedral angle of each cell
+# maxDih: length-n output array, largest dihedral angle of each cell
+# ratio: length-n output array, radius-edge ratio of each cell
+function tetra_quality_kernel(cells, pts, n, minDih, maxDih, ratio)
+    for c = 1:n
+        i0 = cells[c, 1]; i1 = cells[c, 2]; i2 = cells[c, 3]; i3 = cells[c, 4]
+        ax = pts[i1, 1] - pts[i0, 1]; ay = pts[i1, 2] - pts[i0, 2]; az = pts[i1, 3] - pts[i0, 3]
+        bx = pts[i2, 1] - pts[i0, 1]; by = pts[i2, 2] - pts[i0, 2]; bz = pts[i2, 3] - pts[i0, 3]
+        cx = pts[i3, 1] - pts[i0, 1]; cy = pts[i3, 2] - pts[i0, 2]; cz = pts[i3, 3] - pts[i0, 3]
+        # outward area vector of the face opposite each vertex
+        s1x = 0.5 * (cy * bz - cz * by); s1y = 0.5 * (cz * bx - cx * bz); s1z = 0.5 * (cx * by - cy * bx)
+        s2x = 0.5 * (ay * cz - az * cy); s2y = 0.5 * (az * cx - ax * cz); s2z = 0.5 * (ax * cy - ay * cx)
+        s3x = 0.5 * (by * az - bz * ay); s3y = 0.5 * (bz * ax - bx * az); s3z = 0.5 * (bx * ay - by * ax)
+        s0x = -(s1x + s2x + s3x); s0y = -(s1y + s2y + s3y); s0z = -(s1z + s2z + s3z)
+        m0 = sqrt(s0x * s0x + s0y * s0y + s0z * s0z)
+        m1 = sqrt(s1x * s1x + s1y * s1y + s1z * s1z)
+        m2 = sqrt(s2x * s2x + s2y * s2y + s2z * s2z)
+        m3 = sqrt(s3x * s3x + s3y * s3y + s3z * s3z)
+        # cosine of the dihedral angle at each of the 6 edges
+        k01 = -(s0x * s1x + s0y * s1y + s0z * s1z) / (m0 * m1)
+        k02 = -(s0x * s2x + s0y * s2y + s0z * s2z) / (m0 * m2)
+        k03 = -(s0x * s3x + s0y * s3y + s0z * s3z) / (m0 * m3)
+        k12 = -(s1x * s2x + s1y * s2y + s1z * s2z) / (m1 * m2)
+        k13 = -(s1x * s3x + s1y * s3y + s1z * s3z) / (m1 * m3)
+        k23 = -(s2x * s3x + s2y * s3y + s2z * s3z) / (m2 * m3)
+        # the cosine falls as the angle grows, so the extremes swap
+        kMax = min(1.0, max(max(max(k01, k02), max(k03, k12)), max(k13, k23)))
+        kMin = max(-1.0, min(min(min(k01, k02), min(k03, k12)), min(k13, k23)))
+        minDih[c] = 57.29577951308232 * acos(kMax)
+        maxDih[c] = 57.29577951308232 * acos(kMin)
+        # shortest edge, from the 6 squared edge lengths
+        a2 = ax * ax + ay * ay + az * az
+        b2 = bx * bx + by * by + bz * bz
+        c2 = cx * cx + cy * cy + cz * cz
+        d2 = (bx - ax) * (bx - ax) + (by - ay) * (by - ay) + (bz - az) * (bz - az)
+        e2 = (cx - ax) * (cx - ax) + (cy - ay) * (cy - ay) + (cz - az) * (cz - az)
+        f2 = (cx - bx) * (cx - bx) + (cy - by) * (cy - by) + (cz - bz) * (cz - bz)
+        lMin = min(min(min(a2, b2), min(c2, d2)), min(e2, f2))
+        # circumradius from the circumcenter formula
+        bcx = by * cz - bz * cy; bcy = bz * cx - bx * cz; bcz = bx * cy - by * cx
+        cax = cy * az - cz * ay; cay = cz * ax - cx * az; caz = cx * ay - cy * ax
+        abx = ay * bz - az * by; aby = az * bx - ax * bz; abz = ax * by - ay * bx
+        nx = a2 * bcx + b2 * cax + c2 * abx
+        ny = a2 * bcy + b2 * cay + c2 * aby
+        nz = a2 * bcz + b2 * caz + c2 * abz
+        det = ax * bcx + ay * bcy + az * bcz
+        radius = sqrt(nx * nx + ny * ny + nz * nz) / (2.0 * abs(det))
+        ratio[c] = radius / sqrt(lMin)
+    end
+    return nothing
+end
+
 # vertex_volume_kernel(cells, cellVol, n, nPerCell, vertexVol)
 #
 # Split each cell's volume into an equal share for each of its own
@@ -5938,9 +6041,39 @@ function _xdmf_grid_name(meshType::AbstractString)
     return "MeshCollection"
 end
 
+# Format a number with 6 significant digits, for log lines.
+function _g6(x::Float64)
+    return string(round(x; sigdigits = 6))
+end
+
+# Compute the quality figures of the mesh. Return a dictionary of
+# attribute names and values. A 2-D mesh gets the smallest and the largest
+# triangle angle. A 3-D mesh gets the smallest and the largest dihedral
+# angle and the largest radius-edge ratio. The angles are in degrees.
+function _cell_quality(cells::Matrix{Int}, pts3d::Matrix{Float64}, dim::Int)
+    nCells = size(cells, 1)
+    q = Dict{String,Float64}()
+    if dim == 2
+        minAng = zeros(Float64, nCells)
+        maxAng = zeros(Float64, nCells)
+        triangle_angle_kernel(cells, pts3d, nCells, minAng, maxAng)
+        q["min_angle_deg"] = minimum(minAng)
+        q["max_angle_deg"] = maximum(maxAng)
+    else
+        minDih = zeros(Float64, nCells)
+        maxDih = zeros(Float64, nCells)
+        ratio = zeros(Float64, nCells)
+        tetra_quality_kernel(cells, pts3d, nCells, minDih, maxDih, ratio)
+        q["min_dihedral_deg"] = minimum(minDih)
+        q["max_dihedral_deg"] = maximum(maxDih)
+        q["max_radius_edge_ratio"] = maximum(ratio)
+    end
+    return q
+end
+
 # Write one mesh with all its arrays to one HDF5 file.
 function write_hdf5(logBuf::IOBuffer, h5Path, meshType, pts, cells, edges, c2e, cellVol, cvn, vertexVol,
-                    v2cOff, v2cIdx, ptMk, edgeMk,
+                    v2cOff, v2cIdx, ptMk, edgeMk, quality::Dict{String,Float64},
                     periodic::Tuple, perPairs::Dict, allPairs, box::Tuple, dim::Int,
                     obstacles::Vector)
     h5open(h5Path, "w") do f
@@ -5951,6 +6084,9 @@ function write_hdf5(logBuf::IOBuffer, h5Path, meshType, pts, cells, edges, c2e, 
         attrs(f)["n_vertices"] = size(pts, 1)
         attrs(f)["n_cells"] = size(cells, 1)
         attrs(f)["n_edges"] = size(edges, 1)
+        for key in sort(collect(keys(quality)))
+            attrs(f)[key] = quality[key]
+        end
 
         _write_ds(f, "points", pts)
         _write_ds(f, "cell_to_vertex", cells)
@@ -5999,6 +6135,12 @@ function write_hdf5(logBuf::IOBuffer, h5Path, meshType, pts, cells, edges, c2e, 
     _log(logBuf, "    vertices          : $(size(pts,1))")
     _log(logBuf, "    cells             : $(size(cells,1))")
     _log(logBuf, "    edges             : $(size(edges,1))")
+    if haskey(quality, "min_angle_deg")
+        _log(logBuf, "    quality           : angle min=$(_g6(quality["min_angle_deg"])) max=$(_g6(quality["max_angle_deg"])) deg")
+    else
+        _log(logBuf, "    quality           : dihedral min=$(_g6(quality["min_dihedral_deg"])) max=$(_g6(quality["max_dihedral_deg"])) deg, " *
+                     "radius-edge max=$(_g6(quality["max_radius_edge_ratio"]))")
+    end
 end
 
 # Write one XDMF file that points at the mesh data in one HDF5 file.
@@ -6130,6 +6272,9 @@ function main(yamlPath::AbstractString)
         cell_vertex_normal_3d_kernel(cells, pts3d, nCells, cvn)
     end
 
+    _log(logBuf, "Computing cell quality …")
+    quality = _cell_quality(cells, pts3d, dim)
+
     _log(logBuf, "Computing vertex volumes …")
     vertexVol = zeros(Float64, nPts)
     vertex_volume_kernel(cells, cellVol, nCells, dim + 1, vertexVol)
@@ -6152,7 +6297,7 @@ function main(yamlPath::AbstractString)
     hdf5Path = replace(yamlPath, r"\.ya?ml$" => ".h5")
     xdmfPath = replace(yamlPath, r"\.ya?ml$" => ".xdmf")
     write_hdf5(logBuf, hdf5Path, mt, pts3d, cellsOut, edgesOut, c2e, cellVol, cvn, vertexVol,
-               v2cOff, v2cIdx, ptMk, edgeMk, per, perPairs, allPairs, box, dim,
+               v2cOff, v2cIdx, ptMk, edgeMk, quality, per, perPairs, allPairs, box, dim,
                res.obstacles)
     write_xdmf(logBuf, xdmfPath, hdf5Path, nPts, nCells, size(edges, 1), dim, mt)
 

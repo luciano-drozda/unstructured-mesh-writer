@@ -260,7 +260,10 @@ Obstacles (triangle / tetra only)
 HDF5 layout
 -----------
   Attributes: schema_version, mesh_type, dimension, box_length, n_vertices,
-              n_cells, n_edges
+              n_cells, n_edges, and the quality figures below
+  Quality attributes (floats, angles in degrees):
+              2-D: min_angle_deg, max_angle_deg
+              3-D: min_dihedral_deg, max_dihedral_deg, max_radius_edge_ratio
   schema_version is 1: row-major (N, k) datasets and 0-based connectivity.
   It increases when a dataset layout or a dataset meaning changes.
 
@@ -1286,6 +1289,61 @@ def _cell_vertex_normals(pts: np.ndarray, cells: np.ndarray, dim: int) -> np.nda
     return S
 
 
+# ── Cell quality ───────────────────────────────────────────────────────────────
+
+_RAD2DEG = 57.29577951308232
+
+
+def _cell_quality(pts: np.ndarray, cells: np.ndarray, dim: int) -> dict:
+    """
+    Quality figures of the mesh, as a dict of HDF5 attribute names and floats.
+
+    2-D: min_angle_deg, max_angle_deg -- the smallest and the largest
+         interior triangle angle.
+    3-D: min_dihedral_deg, max_dihedral_deg -- the smallest and the largest
+         dihedral angle of the tetrahedra; max_radius_edge_ratio -- the
+         largest ratio of circumradius to shortest edge.
+
+    The dihedral angle at an edge follows from the outward area vectors of
+    the two faces that share it: cos(angle) = -(S_k . S_l) / (|S_k| |S_l|).
+    The 6 pairs of faces are the 6 edges. The circumradius is
+    |a2 (b x c) + b2 (c x a) + c2 (a x b)| / (2 |a . (b x c)|), with a, b, c
+    the edge vectors from vertex 0 and a2, b2, c2 their squared lengths.
+    """
+    if dim == 2:
+        v = [pts[cells[:, k], :2] for k in range(3)]
+        # squared length of the edge opposite each vertex
+        l = [np.sum((v[(k + 2) % 3] - v[(k + 1) % 3]) ** 2, axis=1) for k in range(3)]
+        cosines = np.stack([(l[(k + 1) % 3] + l[(k + 2) % 3] - l[k])
+                            / (2.0 * np.sqrt(l[(k + 1) % 3] * l[(k + 2) % 3]))
+                            for k in range(3)], axis=1)
+        return {"min_angle_deg": float(_RAD2DEG * np.arccos(min(1.0, cosines.max()))),
+                "max_angle_deg": float(_RAD2DEG * np.arccos(max(-1.0, cosines.min())))}
+
+    S = _cell_vertex_normals(pts, cells, 3)           # outward area vectors
+    mag = np.linalg.norm(S, axis=2)
+    cos_all = []
+    for k in range(4):
+        for m in range(k + 1, 4):
+            cos_all.append(-np.sum(S[:, k] * S[:, m], axis=1) / (mag[:, k] * mag[:, m]))
+    cos_all = np.stack(cos_all, axis=1)
+
+    v0, v1, v2, v3 = (pts[cells[:, k]] for k in range(4))
+    a, b, c = v1 - v0, v2 - v0, v3 - v0
+    a2, b2, c2 = (np.sum(x * x, axis=1) for x in (a, b, c))
+    l_min = np.min(np.stack([a2, b2, c2,
+                             np.sum((b - a) ** 2, axis=1),
+                             np.sum((c - a) ** 2, axis=1),
+                             np.sum((c - b) ** 2, axis=1)], axis=1), axis=1)
+    num = (a2[:, None] * np.cross(b, c) + b2[:, None] * np.cross(c, a)
+           + c2[:, None] * np.cross(a, b))
+    det = np.sum(a * np.cross(b, c), axis=1)
+    radius = np.linalg.norm(num, axis=1) / (2.0 * np.abs(det))
+    return {"min_dihedral_deg": float(_RAD2DEG * np.arccos(min(1.0, cos_all.max()))),
+            "max_dihedral_deg": float(_RAD2DEG * np.arccos(max(-1.0, cos_all.min()))),
+            "max_radius_edge_ratio": float(np.max(radius / np.sqrt(l_min)))}
+
+
 # ── Vertex-to-cell (CSR) ───────────────────────────────────────────────────────
 
 def _vertex_to_cell(n_pts: int, cells: np.ndarray):
@@ -1394,7 +1452,7 @@ def write_hdf5(h5_path: str,
                c2e: np.ndarray, cell_vol: np.ndarray, cell_vertex_normal: np.ndarray,
                vertex_vol: np.ndarray,
                v2c_off: np.ndarray, v2c_idx: np.ndarray,
-               pt_mk: np.ndarray, edge_mk,
+               pt_mk: np.ndarray, edge_mk, quality: dict,
                periodic: list, per_pairs: dict, all_pairs: np.ndarray,
                box: list, dim: int, obstacles=None) -> None:
     obstacles = obstacles or []
@@ -1405,6 +1463,8 @@ def write_hdf5(h5_path: str,
                         "dimension" : dim, "box_length": list(box),
                         "n_vertices": int(len(pts3d)), "n_cells": int(len(cells)),
                         "n_edges"   : int(len(edges))})
+        for key in sorted(quality):
+            f.attrs[key] = quality[key]
         f.create_dataset("points",           data=pts3d, **kw)
         f.create_dataset("cell_to_vertex",   data=cells, **kw)
         d_c2e = f.create_dataset("cell_to_edge", data=c2e, **kw)
@@ -1468,6 +1528,13 @@ def write_hdf5(h5_path: str,
     print(f"    cell_vertex_normal: |S_k| max={cvn_mag.max():.6g}")
     print(f"    vertex_vol        : min={vertex_vol.min():.6g}  "
           f"max={vertex_vol.max():.6g}  sum={vertex_vol.sum():.6g}")
+    if "min_angle_deg" in quality:
+        print(f"    quality           : angle min={quality['min_angle_deg']:.6g} "
+              f"max={quality['max_angle_deg']:.6g} deg")
+    else:
+        print(f"    quality           : dihedral min={quality['min_dihedral_deg']:.6g} "
+              f"max={quality['max_dihedral_deg']:.6g} deg, "
+              f"radius-edge max={quality['max_radius_edge_ratio']:.6g}")
     if obstacles:
         print(f"    obstacles         : {len(obstacles):>10,}")
 
@@ -1649,6 +1716,9 @@ def main(yaml_path: str) -> None:
         print("Computing per-cell vertex normals …")
         cell_vertex_normal = _cell_vertex_normals(pts3d, cells, dim)
 
+        print("Computing cell quality …")
+        quality = _cell_quality(pts3d, cells, dim)
+
         print("Computing vertex volumes …")
         vertex_vol = _vertex_volumes(cells, cell_vol, len(pts3d))
 
@@ -1667,7 +1737,7 @@ def main(yaml_path: str) -> None:
 
         write_hdf5(hdf5_path,
                    pts3d, cells, edges, c2e, cell_vol, cell_vertex_normal, vertex_vol,
-                   v2c_off, v2c_idx, pt_mk, edge_mk,
+                   v2c_off, v2c_idx, pt_mk, edge_mk, quality,
                    per, per_pairs, all_pairs, box, dim, obstacle_meta)
         write_xdmf(xdmf_path, hdf5_path,
                    len(pts3d), len(cells), len(edges), dim)

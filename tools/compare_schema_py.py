@@ -35,7 +35,10 @@ for y in sorted(glob.glob(pd_+'/*.yaml')):
     for k in sorted(set(a.attrs)|set(b.attrs)):
         va,vb=a.attrs.get(k),b.attrs.get(k)
         va=va.decode() if isinstance(va,bytes) else va; vb=vb.decode() if isinstance(vb,bytes) else vb
-        if not np.array_equal(va,vb): bad.append(f'attr {k}: {va!r} vs {vb!r}')
+        # Float attributes (the quality figures) match to rounding. The rest match exactly.
+        isf=lambda v: isinstance(v,(float,np.floating))
+        same=(np.allclose(va,vb,rtol=1e-9,atol=0.0) if isf(va) and isf(vb) else np.array_equal(va,vb))
+        if not same: bad.append(f'attr {k}: {va!r} vs {vb!r}')
     for g in ('periodicity',):
         if g in a:
             for k in set(a[g].attrs)|set(b[g].attrs):

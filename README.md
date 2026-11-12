@@ -32,6 +32,15 @@ Connectivity is 0-based. In Julia, load a dataset with `_read_ds` to get the arr
 Attributes: `schema_version` (1: row-major matrices, 0-based connectivity; it increases when a layout or a meaning changes), `mesh_type` (`triangle` for every 2-D mesh, `tetra` for every 3-D mesh), `dimension`,
 `box_length`, `n_vertices`, `n_cells`, `n_edges`.
 
+Quality attributes (floats, angles in degrees; both writers compute them the same way and log them):
+
+| Mesh | Attributes |
+|---|---|
+| 2-D | `min_angle_deg`, `max_angle_deg`: the smallest and the largest interior angle of the triangles |
+| 3-D | `min_dihedral_deg`, `max_dihedral_deg`: the smallest and the largest dihedral angle of the tetrahedra; `max_radius_edge_ratio`: the largest ratio of circumradius to shortest edge (0.612 for a regular tetrahedron) |
+
+Adding attributes does not change `schema_version`.
+
 ## Tests
 
 `julia test_writer.jl [writer.jl]` runs the unit, config, end-to-end and gallery tests of `writer.jl`.
