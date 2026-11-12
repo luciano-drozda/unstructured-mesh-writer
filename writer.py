@@ -91,6 +91,7 @@ Notes on structured types
       Interior triangles are equilateral when dy = dx * sqrt(3)/2, i.e.
           Ly / ny  =  (Lx / nx) * sqrt(3)/2  ≈  0.866 * Lx/nx
       Left/right boundary triangles are right-angle (unavoidable on a box).
+      All triangles are consistently CCW-oriented (positive signed area).
       For y-periodic meshes choose ny even so top/bottom rows are both even.
       No stretching support (the offset-row layout does not generalize to
       a simple per-axis stretched grid).
@@ -886,7 +887,15 @@ def _build_equilateral(cfg: dict):
                     cells.append([s0+i+1, s0+i+2, s1+i+1])  # upward   ▲
             cells.append([s0+nx+1, s0+nx, s1+nx])            # right boundary
 
-    return pts, np.array(cells, dtype=np.int64)
+    cells = np.array(cells, dtype=np.int64)
+    # The up- and down-pointing triangles above are listed in different
+    # vertex orders, so swap the last two vertices of every clockwise cell.
+    # All cells are then CCW (positive signed area), as for 'gridsplit'.
+    p0, p1, p2 = pts[cells[:, 0]], pts[cells[:, 1]], pts[cells[:, 2]]
+    signed = (p1[:, 0]-p0[:, 0])*(p2[:, 1]-p0[:, 1]) - (p1[:, 1]-p0[:, 1])*(p2[:, 0]-p0[:, 0])
+    cw = signed < 0
+    cells[cw, 1], cells[cw, 2] = cells[cw, 2].copy(), cells[cw, 1].copy()
+    return pts, cells
 
 
 def _build_kuhn(cfg: dict):
