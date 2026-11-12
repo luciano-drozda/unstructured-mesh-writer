@@ -1953,13 +1953,17 @@ if haveIO
                 redirect_stdout(devnull) do
                     W.main(joinpath(work, f))
                 end
-                refH5 = joinpath(gdir, replace(f, ".yaml" => ".h5"))
-                isfile(refH5) || continue
-                a = read_all(refH5)
-                b = read_all(joinpath(work, replace(f, ".yaml" => ".h5")))
-                same = keys(a) == keys(b) && all(a[k] isa AbstractArray{Float64} ? reinterpret(UInt64, a[k]) == reinterpret(UInt64, b[k]) : a[k] == b[k] for k in keys(a))
-                check("regression: $group/$f equals the reference output", same)
-                nCmp[] += 1
+                # A config with a hierarchy has one reference file for each level.
+                stem = replace(f, ".yaml" => "")
+                refFiles = [r for r in readdir(gdir) if r == "$stem.h5" || occursin(Regex("^" * stem * "_L[0-9]+\\.h5\$"), r)]
+                for r in refFiles
+                    a = read_all(joinpath(gdir, r))
+                    haveNew = isfile(joinpath(work, r))
+                    b = haveNew ? read_all(joinpath(work, r)) : Dict{String,Any}()
+                    same = haveNew && keys(a) == keys(b) && all(a[k] isa AbstractArray{Float64} ? reinterpret(UInt64, a[k]) == reinterpret(UInt64, b[k]) : a[k] == b[k] for k in keys(a))
+                    check("regression: $group/$r equals the reference output", same)
+                    nCmp[] += 1
+                end
             end
         end
         println("  $(nCmp[]) outputs compared")

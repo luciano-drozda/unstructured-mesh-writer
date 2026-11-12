@@ -222,7 +222,7 @@ In a clean Julia folder this took about 3 minutes. It needs a network. Without `
 
 `julia --project=. test_writer.jl [writer.jl]` runs the unit, config, end-to-end and gallery tests of `writer.jl`.
 With `WRITER_REF_DIR=<folder>` it also compares the output with stored reference outputs bit by bit.
-Make such a folder with `tools/run_writer_on_configs.sh writer.jl <folder>`. See `tools/README.md` for the other tools.
+Make such a folder with `tools/run_writer_on_configs.sh writer.jl <folder>`. It holds 72 outputs: 47 plain meshes and 25 hierarchy levels. See `tools/README.md` for the other tools.
 
 ## Gallery
 

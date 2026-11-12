@@ -1,6 +1,7 @@
 # Tools
 
-- `gen_configs.py OUTDIR`: writes the reference config set (groups `structured`, `triangle`, `tetra`).
+- `gen_configs.py OUTDIR`: writes the reference config set (groups `structured`, `triangle`, `tetra`, `hierarchy`).
+  The group `hierarchy` has 8 configs that cover every mesh type, with 3 or 4 levels. Each one gives one `.h5` file for each level.
 - `run_writer_on_configs.sh WRITER_JL OUTDIR`: generates the configs and runs `writer.jl` on them.
   The folder is a valid `WRITER_REF_DIR` for `test_writer.jl`.
 - `compare_h5.jl REF NEW [--ref-column-major]`: bit-by-bit comparison of the `.h5` files of two folders.

@@ -45,3 +45,13 @@ w("tetra", "tet_sphere", f"mesh_type: tetra\nbox_length: [1.0, 1.0, 1.0]\nobstac
 w("tetra", "tet_several", f"mesh_type: tetra\nbox_length: [2.0, 1.0, 1.0]\nobstacles:\n{sph}{bx}{topt}")
 for p in [(False,False,False),(True,False,False),(False,True,False),(False,False,True),(True,True,True),(False,True,True)]:
     w("tetra", "tet_per_" + "".join("t" if x else "f" for x in p), f"mesh_type: tetra\nbox_length: [2.0, 1.0, 1.0]\nperiodic: {yb(p)}\nobstacles:\n{sph}{bx}{topt}")
+# hierarchy: nested levels of every mesh type. The writer makes one file pair per level.
+hh = "hierarchy:\n  levels: 3\n"
+w("hierarchy", "hier_gs_alt_per", f"mesh_type: gridsplit\nbox_length: [1.0, 1.0]\nn_divisions: [3, 2]\nperiodic: [true, false]\ndiagonal: alternate\n{hh}")
+w("hierarchy", "hier_gs_stretch", "mesh_type: gridsplit\nbox_length: [1.0, 1.0]\nn_divisions: [4, 3]\ndiagonal: slash\nstretching_ratio: [1.3, 1.5]\nstretching_symmetric: [false, true]\nhierarchy:\n  levels: 4\n")
+w("hierarchy", "hier_eq_per", f"mesh_type: equilateral\nbox_length: [1.0, 0.866]\nn_divisions: [4, 4]\nperiodic: [false, true]\n{hh}")
+w("hierarchy", "hier_tri_several", f"mesh_type: triangle\nbox_length: [3.0, 1.0]\nperiodic: [true, true]\nobstacles:\n{circ}{rect}mesh_options:\n  mesh_size: 0.4\n  mesh_size_obstacle: 0.2\n{hh}")
+w("hierarchy", "hier_kuhn_per", f"mesh_type: kuhn\nbox_length: [1.0, 1.0, 1.0]\nn_divisions: [2, 2, 2]\nperiodic: [true, false, true]\ndiagonal: main\n{hh}")
+w("hierarchy", "hier_kuhn_alt_stretch", f"mesh_type: kuhn\nbox_length: [1.0, 1.0, 1.0]\nn_divisions: [2, 3, 2]\ndiagonal: alternate_layers\nstretching_ratio: [1.3, 1.0, 1.5]\nstretching_symmetric: [false, false, true]\n{hh}")
+w("hierarchy", "hier_tet_none", f"mesh_type: tetra\nbox_length: [1.0, 1.0, 1.0]\nmesh_options:\n  mesh_size: 0.5\n{hh}")
+w("hierarchy", "hier_tet_several", f"mesh_type: tetra\nbox_length: [2.0, 1.0, 1.0]\nperiodic: [false, true, true]\nobstacles:\n{sph}{bx}mesh_options:\n  mesh_size: 0.5\n  mesh_size_obstacle: 0.3\n{hh}")
