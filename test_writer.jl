@@ -754,6 +754,21 @@ check("equilateral with odd rows: hashed pairs equal the brute-force pairs", ppN
 
 # ── Equilateral lattice, diagonals, layout (version 2) ───────────────────
 
+# Return the dihedral extremes (degrees) and the radius-edge ratio of each tetrahedron,
+# from the kernels that the writer uses.
+function quality3(cells, pts)
+    n = size(cells, 1)
+    minD = zeros(n); maxD = zeros(n)
+    WCore.tet_dihedral_kernel(cells, pts, n, minD, maxD)
+    ids = collect(1:n)
+    vx = pts[:, 1]; vy = pts[:, 2]; vz = pts[:, 3]
+    ccx = zeros(n); ccy = zeros(n); ccz = zeros(n); ccR = zeros(n)
+    WCore.cell_circumcenter_3d_kernel(cells, vx, vy, vz, ids, n, ccx, ccy, ccz, ccR)
+    ratio = zeros(n); sizeRatio = zeros(n)
+    WCore.cell_quality_3d_kernel(cells, vx, vy, vz, ids, n, ccR, ones(n), ratio, sizeRatio)
+    return rad2deg.(minD), rad2deg.(maxD), ratio
+end
+
 println("Cell quality kernels")
 # One triangle: right isosceles, then equilateral.
 let
@@ -771,8 +786,7 @@ end
 let
     pts = [1.0 1.0 1.0; 1.0 -1.0 -1.0; -1.0 1.0 -1.0; -1.0 -1.0 1.0]
     for (label, cells) in (("one orientation", [1 2 3 4]), ("the other orientation", [1 2 4 3]))
-        mn = zeros(1); mx = zeros(1); ra = zeros(1)
-        WCore.tetra_quality_kernel(cells, pts, 1, mn, mx, ra)
+        mn, mx, ra = quality3(cells, pts)
         want = acos(1 / 3) * 180 / pi
         check("regular tetrahedron ($label): both dihedral extremes are $(round(want; digits = 4))",
               isapprox(mn[1], want; atol = 1e-9) && isapprox(mx[1], want; atol = 1e-9))
@@ -782,8 +796,7 @@ end
 # One corner tetrahedron of a cube (the Kuhn shape): 45, 60 and 90 degrees, ratio sqrt(3)/2.
 let
     pts = [0.0 0.0 0.0; 1.0 0.0 0.0; 1.0 1.0 0.0; 1.0 1.0 1.0]
-    mn = zeros(1); mx = zeros(1); ra = zeros(1)
-    WCore.tetra_quality_kernel([1 2 3 4], pts, 1, mn, mx, ra)
+    mn, mx, ra = quality3([1 2 3 4], pts)
     check("Kuhn tetrahedron: dihedral 45 to 90 degrees", isapprox(mn[1], 45.0; atol = 1e-9) && isapprox(mx[1], 90.0; atol = 1e-9))
     check("Kuhn tetrahedron: the radius-edge ratio is sqrt(3)/2", isapprox(ra[1], sqrt(3) / 2; atol = 1e-12))
 end
@@ -796,8 +809,7 @@ let
     pts = rand(rng, n * 4, 3)
     cells = reshape(collect(1:n * 4), 4, n)'
     cells = Matrix{Int}(cells)
-    mn = zeros(n); mx = zeros(n); ra = zeros(n)
-    WCore.tetra_quality_kernel(cells, pts, n, mn, mx, ra)
+    mn, mx, ra = quality3(cells, pts)
     okMin = true; okMax = true; okRatio = true
     for c in 1:n
         X = pts[cells[c, :], :]

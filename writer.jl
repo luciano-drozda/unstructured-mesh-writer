@@ -818,75 +818,6 @@ function triangle_angle_kernel(cells, pts, n, minAng, maxAng)
     return nothing
 end
 
-# tetra_quality_kernel(cells, pts, n, minDih, maxDih, ratio)
-#
-# Fill minDih and maxDih with the smallest and the largest dihedral angle
-# of each tetrahedron, in degrees. Fill ratio with the circumradius
-# divided by the shortest edge.
-# S_k and S_l are the outward area vectors of the two faces that share
-# one edge. The dihedral angle at that edge follows from
-# cos(angle) = -(S_k . S_l) / (|S_k| |S_l|).
-# The 6 pairs of faces are the 6 edges.
-# The circumradius is R = |a2 (b x c) + b2 (c x a) + c2 (a x b)|
-# / (2 |a . (b x c)|).
-# Here a, b, c are the edge vectors from vertex 0.
-# a2, b2, c2 are their squared lengths.
-#
-# cells: n-by-4 cell-to-vertex array
-# pts: point array, x, y, z
-# n: number of cells
-# minDih: length-n output array, smallest dihedral angle of each cell
-# maxDih: length-n output array, largest dihedral angle of each cell
-# ratio: length-n output array, radius-edge ratio of each cell
-function tetra_quality_kernel(cells, pts, n, minDih, maxDih, ratio)
-    for c = 1:n
-        i0 = cells[c, 1]; i1 = cells[c, 2]; i2 = cells[c, 3]; i3 = cells[c, 4]
-        ax = pts[i1, 1] - pts[i0, 1]; ay = pts[i1, 2] - pts[i0, 2]; az = pts[i1, 3] - pts[i0, 3]
-        bx = pts[i2, 1] - pts[i0, 1]; by = pts[i2, 2] - pts[i0, 2]; bz = pts[i2, 3] - pts[i0, 3]
-        cx = pts[i3, 1] - pts[i0, 1]; cy = pts[i3, 2] - pts[i0, 2]; cz = pts[i3, 3] - pts[i0, 3]
-        # outward area vector of the face opposite each vertex
-        s1x = 0.5 * (cy * bz - cz * by); s1y = 0.5 * (cz * bx - cx * bz); s1z = 0.5 * (cx * by - cy * bx)
-        s2x = 0.5 * (ay * cz - az * cy); s2y = 0.5 * (az * cx - ax * cz); s2z = 0.5 * (ax * cy - ay * cx)
-        s3x = 0.5 * (by * az - bz * ay); s3y = 0.5 * (bz * ax - bx * az); s3z = 0.5 * (bx * ay - by * ax)
-        s0x = -(s1x + s2x + s3x); s0y = -(s1y + s2y + s3y); s0z = -(s1z + s2z + s3z)
-        m0 = sqrt(s0x * s0x + s0y * s0y + s0z * s0z)
-        m1 = sqrt(s1x * s1x + s1y * s1y + s1z * s1z)
-        m2 = sqrt(s2x * s2x + s2y * s2y + s2z * s2z)
-        m3 = sqrt(s3x * s3x + s3y * s3y + s3z * s3z)
-        # cosine of the dihedral angle at each of the 6 edges
-        k01 = -(s0x * s1x + s0y * s1y + s0z * s1z) / (m0 * m1)
-        k02 = -(s0x * s2x + s0y * s2y + s0z * s2z) / (m0 * m2)
-        k03 = -(s0x * s3x + s0y * s3y + s0z * s3z) / (m0 * m3)
-        k12 = -(s1x * s2x + s1y * s2y + s1z * s2z) / (m1 * m2)
-        k13 = -(s1x * s3x + s1y * s3y + s1z * s3z) / (m1 * m3)
-        k23 = -(s2x * s3x + s2y * s3y + s2z * s3z) / (m2 * m3)
-        # the cosine falls as the angle grows, so the extremes swap
-        kMax = min(1.0, max(max(max(k01, k02), max(k03, k12)), max(k13, k23)))
-        kMin = max(-1.0, min(min(min(k01, k02), min(k03, k12)), min(k13, k23)))
-        minDih[c] = 57.29577951308232 * acos(kMax)
-        maxDih[c] = 57.29577951308232 * acos(kMin)
-        # shortest edge, from the 6 squared edge lengths
-        a2 = ax * ax + ay * ay + az * az
-        b2 = bx * bx + by * by + bz * bz
-        c2 = cx * cx + cy * cy + cz * cz
-        d2 = (bx - ax) * (bx - ax) + (by - ay) * (by - ay) + (bz - az) * (bz - az)
-        e2 = (cx - ax) * (cx - ax) + (cy - ay) * (cy - ay) + (cz - az) * (cz - az)
-        f2 = (cx - bx) * (cx - bx) + (cy - by) * (cy - by) + (cz - bz) * (cz - bz)
-        lMin = min(min(min(a2, b2), min(c2, d2)), min(e2, f2))
-        # circumradius from the circumcenter formula
-        bcx = by * cz - bz * cy; bcy = bz * cx - bx * cz; bcz = bx * cy - by * cx
-        cax = cy * az - cz * ay; cay = cz * ax - cx * az; caz = cx * ay - cy * ax
-        abx = ay * bz - az * by; aby = az * bx - ax * bz; abz = ax * by - ay * bx
-        nx = a2 * bcx + b2 * cax + c2 * abx
-        ny = a2 * bcy + b2 * cay + c2 * aby
-        nz = a2 * bcz + b2 * caz + c2 * abz
-        det = ax * bcx + ay * bcy + az * bcz
-        radius = sqrt(nx * nx + ny * ny + nz * nz) / (2.0 * abs(det))
-        ratio[c] = radius / sqrt(lMin)
-    end
-    return nothing
-end
-
 # vertex_volume_kernel(cells, cellVol, n, nPerCell, vertexVol)
 #
 # Split each cell's volume into an equal share for each of its own
@@ -6060,12 +5991,22 @@ function _cell_quality(cells::Matrix{Int}, pts3d::Matrix{Float64}, dim::Int)
         q["min_angle_deg"] = minimum(minAng)
         q["max_angle_deg"] = maximum(maxAng)
     else
-        minDih = zeros(Float64, nCells)
-        maxDih = zeros(Float64, nCells)
+        # The dihedral kernel works in radians. The radius-edge ratio comes
+        # from the circumcenter kernel and the quality kernel.
+        minD = zeros(Float64, nCells)
+        maxD = zeros(Float64, nCells)
+        tet_dihedral_kernel(cells, pts3d, nCells, minD, maxD)
+        ids = collect(1:nCells)
+        vx = pts3d[:, 1]; vy = pts3d[:, 2]; vz = pts3d[:, 3]
+        ccx = zeros(Float64, nCells); ccy = zeros(Float64, nCells); ccz = zeros(Float64, nCells)
+        ccR = zeros(Float64, nCells)
+        cell_circumcenter_3d_kernel(cells, vx, vy, vz, ids, nCells, ccx, ccy, ccz, ccR)
+        hAt = ones(Float64, nCells)
         ratio = zeros(Float64, nCells)
-        tetra_quality_kernel(cells, pts3d, nCells, minDih, maxDih, ratio)
-        q["min_dihedral_deg"] = minimum(minDih)
-        q["max_dihedral_deg"] = maximum(maxDih)
+        sizeRatio = zeros(Float64, nCells)
+        cell_quality_3d_kernel(cells, vx, vy, vz, ids, nCells, ccR, hAt, ratio, sizeRatio)
+        q["min_dihedral_deg"] = rad2deg(minimum(minD))
+        q["max_dihedral_deg"] = rad2deg(maximum(maxD))
         q["max_radius_edge_ratio"] = maximum(ratio)
     end
     return q
