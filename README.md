@@ -51,6 +51,24 @@ A flip is kept only when the new cells fill the same space with a positive volum
 and the radius-edge ratio stays within the larger of the old ratio and `radius_edge_bound`. The smoothing sweeps run after the flips.
 In the 10 reference `tetra` meshes the number of cells below 10 degrees fell from 210 to 4. `writer.py` has no such step.
 
+## Loading a mesh into kernels (`writer.jl`)
+
+`load_mesh(path)` reads a `.h5` file of either writer and returns a `NamedTuple` with the layout that the kernels expect.
+Matrices have the shape `(N, k)`. Every vertex, cell and edge number is 1-based. The file keeps them 0-based.
+
+```julia
+include("writer.jl")
+m = load_mesh("tet_box.h5")
+m.pts      # (N, 3) Float64
+m.cells    # (nCells, 4) Int, 1-based
+m.c2e      # (nCells, 6) Int, 1-based
+meas = zeros(size(m.cells, 1))
+signed_measure_3d_kernel(m.cells, m.pts, size(m.cells, 1), meas)
+```
+
+The other fields are `edges`, `cellVol`, `cvn`, `vertexVol`, `v2cOff` and `v2cIdx`, `ptMk`, `edgeMk` (2-D only), `periodic`, `perPairs`, `allPairs`, `obstacles`, `quality`, `dim`, `meshType`, `boxLength` and `schemaVersion`.
+The cells of vertex `v` are `v2cIdx[v2cOff[v]:v2cOff[v+1]-1]`. The function stops with an error when `schema_version` is not 1.
+
 ## Known limitations of `writer.py`
 
 Status: documented on 2026-11-12. These problems are not fixed. The work now focuses on `writer.jl`. `writer.py` is unchanged.

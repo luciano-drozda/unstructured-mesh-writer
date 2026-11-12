@@ -6279,6 +6279,72 @@ function _read_ds(loc, name::AbstractString)
     return ndims(data) >= 2 ? permutedims(data, ndims(data):-1:1) : data
 end
 
+# Read one mesh file that either writer made. Return a NamedTuple with the
+# arrays that the kernels use. A matrix has the shape (N, k). Every number
+# of a vertex, cell or edge is 1-based, as in the kernels. The file keeps
+# them 0-based. The fields are:
+# dim, meshType, boxLength, schemaVersion: the scalar attributes.
+# quality: a Dict of the quality attributes.
+# pts: the points, (N, 3).
+# cells: the vertices of each cell, (nCells, dim+1).
+# edges: the vertices of each edge, (nEdges, 2).
+# c2e: the edges of each cell, (nCells, 3 or 6).
+# cellVol, vertexVol: the volumes. cvn: the vertex normals, (nCells, dim+1, 3).
+# v2cOff, v2cIdx: the cells of vertex v are v2cIdx[v2cOff[v]:v2cOff[v+1]-1].
+# ptMk: the vertex markers. edgeMk: the edge markers of a 2-D mesh, else nothing.
+# periodic: one Bool per axis. perPairs: a Dict from x, y, z to a pair matrix.
+# allPairs: all pairs, (nPairs, 2). obstacles: a list of NamedTuples.
+# The function stops with an error when schema_version is not 1.
+function load_mesh(path::AbstractString)
+    h5open(path, "r") do f
+        a = attrs(f)
+        haskey(a, "schema_version") || error("$path has no schema_version attribute. It is not a mesh file of this writer.")
+        version = Int(a["schema_version"])
+        version == 1 || error("$path has schema_version $version. load_mesh reads version 1 only.")
+        dim = Int(a["dimension"])
+        quality = Dict{String,Float64}()
+        for key in ("min_angle_deg", "max_angle_deg", "min_dihedral_deg", "max_dihedral_deg", "max_radius_edge_ratio")
+            haskey(a, key) && (quality[key] = Float64(a[key]))
+        end
+        rd(g, name) = _read_ds(g, name)
+        pts = rd(f, "points")
+        cells = Int.(rd(f, "cell_to_vertex")) .+ 1
+        edges = Int.(rd(f, "vertex_to_vertex")) .+ 1
+        c2e = Int.(rd(f, "cell_to_edge")) .+ 1
+        v2cOff = Int.(rd(f["vertex_to_cell"], "offsets")) .+ 1
+        v2cIdx = Int.(rd(f["vertex_to_cell"], "indices")) .+ 1
+        edgeMk = haskey(f, "boundary/edge_markers") ? rd(f["boundary"], "edge_markers") : nothing
+
+        p = f["periodicity"]
+        pa = attrs(p)
+        periodic = Tuple(haskey(pa, "periodic_$d") && pa["periodic_$d"] != 0 for d in _dirs()[1:dim])
+        perPairs = Dict{String,Matrix{Int}}()
+        for d in _dirs()[1:dim]
+            haskey(p, "$(d)_pairs") && (perPairs[d] = Int.(rd(p, "$(d)_pairs")) .+ 1)
+        end
+        allPairs = haskey(p, "all_pairs") ? Int.(rd(p, "all_pairs")) .+ 1 : zeros(Int, 0, 2)
+
+        obstacles = NamedTuple[]
+        if haskey(f, "obstacles")
+            o = f["obstacles"]
+            for i in 0:Int(attrs(o)["count"]) - 1
+                og = o["obstacle_$i"]
+                oa = attrs(og)
+                shape = String(oa["shape"])
+                extent = haskey(oa, "radius") ? Float64(oa["radius"]) : Float64.(oa["half_extents"])
+                push!(obstacles, (shape = shape, marker = Int(oa["marker"]),
+                                  center = Float64.(oa["center"]), extent = extent))
+            end
+        end
+        return (dim = dim, meshType = String(a["mesh_type"]), boxLength = Float64.(a["box_length"]),
+                schemaVersion = version, quality = quality,
+                pts = pts, cells = cells, edges = edges, c2e = c2e,
+                cellVol = rd(f, "cell_vol"), cvn = rd(f, "cell_vertex_normal"), vertexVol = rd(f, "vertex_vol"),
+                v2cOff = v2cOff, v2cIdx = v2cIdx, ptMk = rd(f["boundary"], "point_markers"), edgeMk = edgeMk,
+                periodic = periodic, perPairs = perPairs, allPairs = allPairs, obstacles = obstacles)
+    end
+end
+
 # Return the value of the HDF5 attribute mesh_type. It names the cell
 # type, as writer.py does: triangle for every 2-D mesh and tetra for
 # every 3-D mesh. The config key mesh_type records how the mesh was made.

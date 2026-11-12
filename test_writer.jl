@@ -1220,6 +1220,47 @@ if haveIO
         check("$name: all_pairs exists exactly when an axis is periodic", haskey(d1, "/periodicity/all_pairs") == periodicAll)
         check("$name: mesh_type attribute is $h5type", d1["@/mesh_type"] == h5type)
         check("$name: schema_version attribute is 1", d1["@/schema_version"] == 1)
+
+        # load_mesh gives the arrays back as the kernels need them.
+        m = W.load_mesh(joinpath(dir, "$name.h5"))
+        nvM = size(m.pts, 1); ncM = size(m.cells, 1)
+        check("$name: load_mesh keeps the shapes (N, k)",
+              size(m.pts) == (nvM, 3) && size(m.cells, 2) == dim + 1 && size(m.c2e) == (ncM, dim == 2 ? 3 : 6) &&
+              size(m.cvn) == (ncM, dim + 1, 3) && size(m.edges, 2) == 2)
+        check("$name: load_mesh equals the datasets of the file",
+              m.pts == d1["/points"] && m.cells == d1["/cell_to_vertex"] .+ 1 && m.edges == d1["/vertex_to_vertex"] .+ 1 &&
+              m.c2e == d1["/cell_to_edge"] .+ 1 && m.cellVol == d1["/cell_vol"] && m.cvn == d1["/cell_vertex_normal"] &&
+              m.vertexVol == d1["/vertex_vol"] && m.ptMk == d1["/boundary/point_markers"])
+        check("$name: load_mesh numbers are 1-based", minimum(m.cells) == 1 && maximum(m.cells) == nvM && minimum(m.c2e) == 1 &&
+              maximum(m.c2e) == size(m.edges, 1) && maximum(m.edges) <= nvM)
+        meas = zeros(ncM)
+        dim == 2 ? W.signed_measure_2d_kernel(m.cells, m.pts, ncM, meas) : W.signed_measure_3d_kernel(m.cells, m.pts, ncM, meas)
+        check("$name: a kernel on the loaded arrays gives the stored cell volumes", all(>(0), meas) && isapprox(meas, m.cellVol; rtol = 1e-12))
+        okV2C = length(m.v2cOff) == nvM + 1 && m.v2cOff[1] == 1 && m.v2cOff[end] == length(m.v2cIdx) + 1
+        for v in 1:nvM
+            okV2C || break
+            for k in m.v2cOff[v]:m.v2cOff[v + 1] - 1
+                (v in m.cells[m.v2cIdx[k], :]) || (okV2C = false)
+            end
+        end
+        check("$name: the loaded vertex-to-cell lists agree with the cells", okV2C)
+        okE = all(m.edges[m.c2e[c, li], :] == sort([m.cells[c, la], m.cells[c, lb]])
+                  for c in 1:min(ncM, 200) for (li, (la, lb)) in enumerate(dim == 2 ? W._tri_local_edges() : W._tet_local_edges()))
+        check("$name: the loaded cell-to-edge rows name the edges of the cell", okE)
+        check("$name: the loaded periodic flags equal the config", m.periodic == W.load_config(yaml)["periodic"])
+        okP = true
+        for (dn, pr) in m.perPairs
+            ax = findfirst(==(dn), W._dirs())
+            others = [a for a in 1:3 if a != ax]
+            okP &= all(1 .<= pr .<= nvM) && all(abs.(m.pts[pr[:, 1], others] .- m.pts[pr[:, 2], others]) .< 1e-7)
+        end
+        check("$name: the loaded periodic pairs join points that differ along one axis only", okP)
+        check("$name: the loaded attributes are the stored ones",
+              m.dim == dim && m.meshType == h5type && m.boxLength == d1["@/box_length"] && m.schemaVersion == 1 &&
+              all(k -> m.quality[k] == d1["@/$k"], collect(keys(m.quality))) && !isempty(m.quality))
+        check("$name: the loaded edge markers exist for a 2-D mesh only", (m.edgeMk !== nothing) == (dim == 2))
+        check("$name: the loaded obstacles match the config", length(m.obstacles) == (hasObs ? length(W.load_config(yaml)["obstacles"]) : 0) &&
+              all(o -> o.marker >= 10, m.obstacles))
         qNames = dim == 2 ? ["min_angle_deg", "max_angle_deg"] : ["min_dihedral_deg", "max_dihedral_deg", "max_radius_edge_ratio"]
         qOther = dim == 2 ? ["min_dihedral_deg", "max_dihedral_deg", "max_radius_edge_ratio"] : ["min_angle_deg", "max_angle_deg"]
         check("$name: the quality attributes $(join(qNames, ", ")) exist", all(q -> haskey(d1, "@/$q"), qNames))
@@ -1355,6 +1396,20 @@ if haveIO
     # rely on. The fields: name, YAML text, dimension, vertex count, cell
     # count, whether the counts are exact (the Delaunay counts only need
     # to lie within 10 percent), and the sum of the cell volumes.
+    # load_mesh stops on a file with the wrong schema_version or none.
+    let
+        bad = joinpath(dir, "bad_version.h5")
+        HDF5.h5open(bad, "w") do f
+            HDF5.attrs(f)["schema_version"] = 2
+        end
+        check("load_mesh: schema_version 2 is an error", raises(() -> W.load_mesh(bad)))
+        none = joinpath(dir, "no_version.h5")
+        HDF5.h5open(none, "w") do f
+            HDF5.attrs(f)["dimension"] = 2
+        end
+        check("load_mesh: a missing schema_version is an error", raises(() -> W.load_mesh(none)))
+    end
+
     println("Gallery")
     galleryCases = [
         ("equilateral_plain", "mesh_type: equilateral\nbox_length: [1.0, 0.866]\nn_divisions: [4, 4]\nperiodic: [false, false]", 2, 27, 36, true, 0.866),
