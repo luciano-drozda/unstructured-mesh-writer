@@ -11,5 +11,5 @@ W=$(realpath "$1"); OUT=$2
 rm -rf "$OUT"; mkdir -p "$OUT"
 python3 "$HERE/gen_configs.py" "$OUT"
 for g in structured triangle tetra; do
-    julia "$W" "$OUT/$g" > "$OUT/$g.log" 2>&1 || echo "$g: exit $?"
+    julia --project="$HERE/.." "$W" "$OUT/$g" > "$OUT/$g.log" 2>&1 || echo "$g: exit $?"
 done

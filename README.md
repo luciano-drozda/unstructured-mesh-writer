@@ -4,7 +4,7 @@ A writer of 2D Triangular and 3D Tetrahedral unstructured meshes
 Two writers produce the same HDF5/XDMF schema:
 
 - `writer.py` (Python, MeshPy for `triangle` and `tetra`): `python writer.py config.yaml` or `python writer.py configs_dir/`.
-- `writer.jl` (Julia, no mesher library; Delaunay refinement is built in): `julia writer.jl config.yaml` or `julia writer.jl configs_dir/`. It needs the packages YAML and HDF5.
+- `writer.jl` (Julia, no mesher library; Delaunay refinement is built in): `julia --project=. writer.jl config.yaml` or `julia --project=. writer.jl configs_dir/`.
 
 Both write `<name>.h5` and `<name>.xdmf` next to the config. The mesh types are
 `gridsplit`, `equilateral` (2-D), `kuhn` (3-D), `triangle` and `tetra` (Delaunay, with obstacles).
@@ -51,9 +51,15 @@ A flip is kept only when the new cells fill the same space with a positive volum
 and the radius-edge ratio stays within the larger of the old ratio and `radius_edge_bound`. The smoothing sweeps run after the flips.
 In the 10 reference `tetra` meshes the number of cells below 10 degrees fell from 210 to 4. `writer.py` has no such step.
 
+## Julia environment
+
+`Project.toml` and `Manifest.toml` pin the Julia packages: YAML 0.4.17 and HDF5 0.17.4, with every package they need.
+The Manifest was made with Julia 1.10.11. Run `julia --project=. -e 'import Pkg; Pkg.instantiate()'` once in this folder. It installs the exact versions.
+In a clean Julia folder this took about 3 minutes. It needs a network. Without `--project=.`, Julia uses your global environment instead.
+
 ## Tests
 
-`julia test_writer.jl [writer.jl]` runs the unit, config, end-to-end and gallery tests of `writer.jl`.
+`julia --project=. test_writer.jl [writer.jl]` runs the unit, config, end-to-end and gallery tests of `writer.jl`.
 With `WRITER_REF_DIR=<folder>` it also compares the output with stored reference outputs bit by bit.
 Make such a folder with `tools/run_writer_on_configs.sh writer.jl <folder>`. See `tools/README.md` for the other tools.
 
