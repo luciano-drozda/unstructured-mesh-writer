@@ -33,6 +33,7 @@ Keys in the YAML file:
     stretching_symmetric  gridsplit and kuhn.   Error.
     obstacles           Error if not empty.     Optional.
     mesh_options        Error.                  Required.
+    hierarchy           Optional.               Optional.
     gmsh_options        Error.                  Error.
 
 A config that has mesh_options and no mesh_type is an error. An error
@@ -69,6 +70,26 @@ Keys in mesh_options:
     smoothing_sweeps    Number of Jacobi smoothing sweeps. Default: 3.
     max_vertices        Safety limit on the vertex count.
                         Default: 2000000 for triangle, 1000000 for tetra.
+
+Keys in hierarchy (a mesh hierarchy for geometric multigrid):
+    levels              Number of levels, coarsest included. A whole
+                        number, 1 or more. Required.
+    boundary            frozen. The only value for now. The new boundary
+                        vertices are edge midpoints, so an obstacle keeps
+                        the polygon (polyhedron) of level 0.
+    max_cells           Limit on the cells of the finest level. The
+                        writer stops with an error before it refines
+                        when the estimate is above the limit.
+                        Default: 2000000.
+The mesh that the other keys describe is level 0, the coarsest mesh.
+Level k comes from k red refinements. Each triangle gives 4 triangles.
+The files are stem_L0.h5, stem_L1.h5, and so on, with one XDMF file
+each. Every file has the group hierarchy. A file after level 0 has the
+datasets fine_vertex_parents (n_vertices by 2) and cell_parent
+(n_cells), 0-based. The fine vertices 1 to nV are the coarse vertices.
+The midpoint of coarse edge e is fine vertex nV + e. The children of
+coarse cell k are the rows 4 (k - 1) + 1 to 4 k. The writer makes no
+transfer operator. Only 2-D meshes support the key for now.
 
 Markers: the 2-D box sides are 1 bottom, 2 right, 3 top, 4 left. The 3-D
 box faces are 1 xmin, 2 xmax, 3 ymin, 4 ymax, 5 zmin, 6 zmax. Obstacle
@@ -1784,6 +1805,71 @@ function group_extrema_kernel(vals, idx, start, count, nG, outMin, outMax, outSu
         outMin[g] = lo
         outMax[g] = hi
         outSum[g] = total
+    end
+    return nothing
+end
+
+# edge_midpoint_kernel(pts, edges, nV, nE, nd, out)
+#
+# Write the midpoint of every edge into out. The midpoint of edge e goes
+# to row nV + e. The rows 1 to nV of out stay as the caller set them.
+#
+# pts: vertex array with nd columns
+# edges: nE-by-2 edge-to-vertex array, 1-based
+# nV: number of vertices in pts
+# nE: number of edges
+# nd: number of columns of pts, 2 or 3
+# out: (nV + nE)-by-nd output array
+function edge_midpoint_kernel(pts, edges, nV, nE, nd, out)
+    # One fused loop over the edges and the columns.
+    for idx = 1:nE * nd
+        e = div(idx - 1, nd) + 1
+        d = mod(idx - 1, nd) + 1
+        a = edges[e, 1]
+        b = edges[e, 2]
+        out[nV + e, d] = 0.5 * (pts[a, d] + pts[b, d])
+    end
+    return nothing
+end
+
+# refine_triangles_2d_kernel(cells, c2e, nV, nCells, out)
+#
+# Split each triangle into 4 triangles. Three corner triangles and one
+# center triangle make the children. The children of cell k are the rows
+# 4k-3 to 4k of out. A midpoint has the vertex number nV + 1 + c2e[k, j],
+# where c2e holds 0-based edge numbers. The local edges 1, 2 and 3 join
+# the local vertices (1, 2), (1, 3) and (2, 3).
+#
+# cells: nCells-by-3 cell-to-vertex array, 1-based
+# c2e: nCells-by-3 cell-to-edge array, 0-based
+# nV: number of vertices of the coarse mesh
+# nCells: number of coarse cells
+# out: 4 nCells-by-3 output array
+function refine_triangles_2d_kernel(cells, c2e, nV, nCells, out)
+    for k = 1:nCells
+        a = cells[k, 1]
+        b = cells[k, 2]
+        c = cells[k, 3]
+        mab = nV + 1 + c2e[k, 1]
+        mac = nV + 1 + c2e[k, 2]
+        mbc = nV + 1 + c2e[k, 3]
+        r = 4 * (k - 1)
+        # corner at a
+        out[r + 1, 1] = a
+        out[r + 1, 2] = mab
+        out[r + 1, 3] = mac
+        # corner at b
+        out[r + 2, 1] = mab
+        out[r + 2, 2] = b
+        out[r + 2, 3] = mbc
+        # corner at c
+        out[r + 3, 1] = mac
+        out[r + 3, 2] = mbc
+        out[r + 3, 3] = c
+        # center
+        out[r + 4, 1] = mab
+        out[r + 4, 2] = mbc
+        out[r + 4, 3] = mac
     end
     return nothing
 end
@@ -6051,6 +6137,126 @@ function _grid_edge_markers(res, edges::Matrix{Int})
     return nothing
 end
 
+# ── Hierarchy: nested refinement ────────────────────────────────────────
+#
+# Level 0 is the coarsest mesh. Level k comes from k red refinements.
+# Every cell splits into 4 (2-D) or 8 (3-D) children. Every edge gets one
+# new vertex at its midpoint. The fine vertices 1 to nV are the coarse
+# vertices. The midpoint of coarse edge e is fine vertex nV + e. Let c be
+# 4 in 2-D and 8 in 3-D. The children of coarse cell k are the fine rows
+# c (k - 1) + 1 to c k. No flip and no smoothing run on a fine level,
+# because either one would break the nesting.
+
+# Return the parents of the fine vertices of one refinement. A coarse
+# vertex has its own number twice. A midpoint has the two end vertices
+# of its coarse edge. All numbers are 1-based.
+function _vertex_parents(edges::Matrix{Int}, nV::Int)
+    nE = size(edges, 1)
+    vp = zeros(Int, nV + nE, 2)
+    for v in 1:nV
+        vp[v, 1] = v
+        vp[v, 2] = v
+    end
+    for e in 1:nE
+        vp[nV + e, 1] = edges[e, 1]
+        vp[nV + e, 2] = edges[e, 2]
+    end
+    return vp
+end
+
+# Return the parent cell of each child. The cell numbers are 1-based.
+function _cell_parents(nCells::Int, children::Int)
+    cp = zeros(Int, children * nCells)
+    for k in 1:nCells, j in 1:children
+        cp[children * (k - 1) + j] = k
+    end
+    return cp
+end
+
+# Refine a 2-D result record one time. The record must hold edges, c2e
+# and edgeMk. Return the fine record, with its own edges, c2e and edgeMk,
+# and a NamedTuple with the two parent arrays. A midpoint takes the
+# marker of its coarse edge. A fine edge that is half of a coarse edge
+# takes the marker of that edge. Every other fine edge has marker 0.
+function _refine_mesh2(res)
+    pts = res.pts::Matrix{Float64}
+    cells = res.cells::Matrix{Int}
+    ptMk = res.ptMk::Vector{Int32}
+    edges = res.edges::Matrix{Int}
+    c2e = res.c2e::Matrix{Int}
+    edgeMk = res.edgeMk::Vector{Int32}
+    nV = size(pts, 1)
+    nC = size(cells, 1)
+    nE = size(edges, 1)
+    nF = nV + nE
+
+    ptsF = zeros(Float64, nF, 2)
+    ptsF[1:nV, :] = pts
+    edge_midpoint_kernel(pts, edges, nV, nE, 2, ptsF)
+
+    cellsF = zeros(Int, 4 * nC, 3)
+    refine_triangles_2d_kernel(cells, c2e, nV, nC, cellsF)
+    # The children of a positive cell are positive. Keep the check, so
+    # that a cell with a wrong orientation cannot pass.
+    meas = zeros(Float64, 4 * nC)
+    signed_measure_2d_kernel(cellsF, hcat(ptsF, zeros(Float64, nF)), 4 * nC, meas)
+    fix_orientation_kernel(meas, 4 * nC, 3, cellsF)
+
+    ptMkF = zeros(Int32, nF)
+    ptMkF[1:nV] = ptMk
+    for e in 1:nE
+        ptMkF[nV + e] = edgeMk[e]
+    end
+
+    edgesF, c2eF = _build_edge_registry(cellsF, 2)
+    edgeMkF = zeros(Int32, size(edgesF, 1))
+    for f in 1:size(edgesF, 1)
+        u = edgesF[f, 1]
+        w = edgesF[f, 2]
+        # A half edge joins one midpoint to one end of its coarse edge.
+        if u > nV && w <= nV
+            mid, other = u, w
+        elseif w > nV && u <= nV
+            mid, other = w, u
+        else
+            continue
+        end
+        ec = mid - nV
+        if other == edges[ec, 1] || other == edges[ec, 2]
+            edgeMkF[f] = edgeMk[ec]
+        end
+    end
+
+    resF = merge(res, (pts = ptsF, cells = cellsF, ptMk = ptMkF, edgeMk = edgeMkF,
+                       edges = edgesF, c2e = c2eF, info = nothing))
+    parents = (vertexParents = _vertex_parents(edges, nV), cellParent = _cell_parents(nC, 4))
+    return resF, parents
+end
+
+# Check the config value of the key hierarchy. Return nothing when the
+# key is absent. Otherwise return a NamedTuple with the fields levels,
+# boundary and maxCells.
+function _resolve_hierarchy_options(raw)
+    raw === nothing && return nothing
+    raw isa AbstractDict || error("'hierarchy' must be a mapping")
+    known = ("levels", "boundary", "max_cells")
+    for k in keys(raw)
+        k in known || error("hierarchy: unknown key '$k'. Valid keys: $(join(known, ", "))")
+    end
+    haskey(raw, "levels") || error("hierarchy: 'levels' is required")
+    whole(v) = v isa Integer && !(v isa Bool)
+    levels = raw["levels"]
+    (whole(levels) && levels >= 1) || error("hierarchy['levels'] must be a whole number, 1 or more, got $(repr(levels))")
+    boundary = get(raw, "boundary", "frozen")
+    if boundary == "projected"
+        error("hierarchy['boundary'] 'projected' is not available yet. Use 'frozen'.")
+    end
+    boundary == "frozen" || error("hierarchy['boundary'] must be 'frozen', got $(repr(boundary))")
+    maxCells = get(raw, "max_cells", 2000000)
+    (whole(maxCells) && maxCells >= 1) || error("hierarchy['max_cells'] must be a whole number, 1 or more, got $(repr(maxCells))")
+    return (levels = Int(levels), boundary = String(boundary), maxCells = Int(maxCells))
+end
+
 # ── Config check ─────────────────────────────────────────────────────────
 #
 # This function needs no package. It takes the Dict that the YAML reader
@@ -6136,6 +6342,7 @@ function _check_config(cfg)
     else
         cfg["mesh_options"] = _resolve_mesh_options3(cfg["mesh_options"])
     end
+    cfg["hierarchy"] = _resolve_hierarchy_options(get(cfg, "hierarchy", nothing))
     cfg["mesh_type"] = mt
     cfg["dim"] = dim
     return cfg
@@ -6294,6 +6501,9 @@ end
 # ptMk: the vertex markers. edgeMk: the edge markers of a 2-D mesh, else nothing.
 # periodic: one Bool per axis. perPairs: a Dict from x, y, z to a pair matrix.
 # allPairs: all pairs, (nPairs, 2). obstacles: a list of NamedTuples.
+# hierarchy: nothing, or the fields level, nLevels, refinement, boundary,
+# childrenPerCell, vertexParents and cellParent. The last two are nothing
+# at level 0. Level 0 is the coarsest.
 # The function stops with an error when schema_version is not 1.
 function load_mesh(path::AbstractString)
     h5open(path, "r") do f
@@ -6336,12 +6546,23 @@ function load_mesh(path::AbstractString)
                                   center = Float64.(oa["center"]), extent = extent))
             end
         end
+        hierarchy = nothing
+        if haskey(f, "hierarchy")
+            h = f["hierarchy"]
+            ha = attrs(h)
+            level = Int(ha["level"])
+            hierarchy = (level = level, nLevels = Int(ha["n_levels"]), refinement = String(ha["refinement"]),
+                         boundary = String(ha["boundary"]), childrenPerCell = Int(ha["children_per_cell"]),
+                         vertexParents = level > 0 ? Int.(rd(h, "fine_vertex_parents")) .+ 1 : nothing,
+                         cellParent = level > 0 ? Int.(rd(h, "cell_parent")) .+ 1 : nothing)
+        end
         return (dim = dim, meshType = String(a["mesh_type"]), boxLength = Float64.(a["box_length"]),
                 schemaVersion = version, quality = quality,
                 pts = pts, cells = cells, edges = edges, c2e = c2e,
                 cellVol = rd(f, "cell_vol"), cvn = rd(f, "cell_vertex_normal"), vertexVol = rd(f, "vertex_vol"),
                 v2cOff = v2cOff, v2cIdx = v2cIdx, ptMk = rd(f["boundary"], "point_markers"), edgeMk = edgeMk,
-                periodic = periodic, perPairs = perPairs, allPairs = allPairs, obstacles = obstacles)
+                periodic = periodic, perPairs = perPairs, allPairs = allPairs, obstacles = obstacles,
+                hierarchy = hierarchy)
     end
 end
 
@@ -6403,7 +6624,7 @@ end
 function write_hdf5(logBuf::IOBuffer, h5Path, meshType, pts, cells, edges, c2e, cellVol, cvn, vertexVol,
                     v2cOff, v2cIdx, ptMk, edgeMk, quality::Dict{String,Float64},
                     periodic::Tuple, perPairs::Dict, allPairs, box::Tuple, dim::Int,
-                    obstacles::Vector)
+                    obstacles::Vector, hier)
     h5open(h5Path, "w") do f
         attrs(f)["schema_version"] = 1
         attrs(f)["mesh_type"] = _h5_mesh_type(meshType)
@@ -6441,6 +6662,19 @@ function write_hdf5(logBuf::IOBuffer, h5Path, meshType, pts, cells, edges, c2e, 
             _write_ds(p, "$(dname)_pairs", arr)
         end
         _write_ds(p, "all_pairs", allPairs)
+
+        if hier !== nothing
+            h = create_group(f, "hierarchy")
+            attrs(h)["level"] = hier.level
+            attrs(h)["n_levels"] = hier.nLevels
+            attrs(h)["refinement"] = "red"
+            attrs(h)["boundary"] = hier.boundary
+            attrs(h)["children_per_cell"] = hier.children
+            if hier.level > 0
+                _write_ds(h, "fine_vertex_parents", hier.vertexParents .- 1)
+                _write_ds(h, "cell_parent", hier.cellParent .- 1)
+            end
+        end
 
         if !isempty(obstacles)
             o = create_group(f, "obstacles")
@@ -6559,16 +6793,65 @@ function main(yamlPath::AbstractString)
     cfg = load_config(yamlPath)
     _log(logBuf, "Building '$(cfg["mesh_type"])' mesh …")
     res = _build_mesh(logBuf, cfg)
-    _write_level(logBuf, yamlPath, replace(yamlPath, r"\.ya?ml$" => ""), cfg, res)
+    stem = replace(yamlPath, r"\.ya?ml$" => "")
+    if cfg["hierarchy"] === nothing
+        _write_level(logBuf, yamlPath, stem, cfg, res, nothing)
+    else
+        _write_hierarchy(logBuf, yamlPath, stem, cfg, res)
+    end
+    return nothing
+end
+
+# Write the levels of a hierarchy. Level 0 is the mesh of the builder.
+# Each next level is the red refinement of the one before. The files are
+# stem_L0, stem_L1, and so on. The function stops with an error before
+# the refinement when the finest level would have more cells than
+# max_cells.
+function _write_hierarchy(logBuf::IOBuffer, yamlPath::AbstractString, stem::AbstractString, cfg::Dict, res)
+    H = cfg["hierarchy"]
+    dim = cfg["dim"]
+    children = dim == 2 ? 4 : 8
+    dim == 2 || error("hierarchy: 3-D meshes are not supported in this version")
+    nCoarse = size(res.cells, 1)
+    estimate = Float64(nCoarse) * Float64(children)^(H.levels - 1)
+    if estimate > H.maxCells
+        error("hierarchy: the finest level of $(H.levels) levels would have about $(round(Int, estimate)) cells. " *
+              "The limit max_cells is $(H.maxCells). The coarsest mesh has $nCoarse cells. " *
+              "Use fewer levels, a coarser mesh, or a larger max_cells.")
+    end
+
+    # Level 0 needs the edge array and the edge markers before it refines.
+    if res.edges === nothing
+        edges, c2e = _build_edge_registry(res.cells::Matrix{Int}, dim)
+        res = merge(res, (edges = edges, c2e = c2e))
+    end
+    res = merge(res, (edgeMk = _grid_edge_markers(res, res.edges::Matrix{Int}),))
+
+    parents = nothing
+    for k in 0:H.levels - 1
+        buf = k == 0 ? logBuf : IOBuffer()
+        if k > 0
+            _log(buf, "Refining level $(k - 1) to make level $k …")
+            res, parents = dim == 2 ? _refine_mesh2(res) : _refine_mesh3(res)
+        end
+        _log(buf, "Level $k of $(H.levels - 1): $(size(res.pts, 1)) vertices, $(size(res.cells, 1)) cells")
+        hier = (level = k, nLevels = H.levels, boundary = H.boundary, children = children,
+                vertexParents = parents === nothing ? nothing : parents.vertexParents,
+                cellParent = parents === nothing ? nothing : parents.cellParent)
+        _write_level(buf, yamlPath, "$(stem)_L$k", cfg, res, hier)
+    end
     return nothing
 end
 
 # Run the steps after the builder on one result record. The function
 # computes the edges, the volumes, the normals, the quality, the
 # vertex-to-cell lists and the periodic pairs. Then it writes the HDF5
-# file and the XDMF file with the path stem (no extension) and appends
-# the provenance record. yamlPath names the config for the provenance.
-function _write_level(logBuf::IOBuffer, yamlPath::AbstractString, stem::AbstractString, cfg::Dict, res)
+# file and the XDMF file. The path stem has no extension. At the end it
+# appends the provenance record. yamlPath names the config for it.
+# hier is nothing for a mesh without hierarchy. Otherwise it is the
+# NamedTuple of one level. A level after level 0 carries a pointer to
+# level 0 instead of the writer source.
+function _write_level(logBuf::IOBuffer, yamlPath::AbstractString, stem::AbstractString, cfg::Dict, res, hier)
     mt, dim, per, box = cfg["mesh_type"], cfg["dim"], cfg["periodic"], cfg["box_length"]
     cells = res.cells::Matrix{Int}
     resPts = res.pts::Matrix{Float64}
@@ -6635,11 +6918,16 @@ function _write_level(logBuf::IOBuffer, yamlPath::AbstractString, stem::Abstract
     xdmfPath = stem * ".xdmf"
     write_hdf5(logBuf, hdf5Path, mt, pts3d, cellsOut, edgesOut, c2e, cellVol, cvn, vertexVol,
                v2cOff, v2cIdx, ptMk, edgeMk, quality, per, perPairs, allPairs, box, dim,
-               res.obstacles)
+               res.obstacles, hier)
     write_xdmf(logBuf, xdmfPath, hdf5Path, nPts, nCells, size(edges, 1), dim, mt)
 
     terminalText = String(take!(logBuf))
-    _append_provenance(logBuf, xdmfPath, yamlPath, read(yamlPath, String), terminalText, read(@__FILE__, String))
+    if hier !== nothing && hier.level > 0
+        scriptText = "The writer source is in $(replace(basename(stem), r"_L[0-9]+$" => "_L0")).xdmf."
+    else
+        scriptText = read(@__FILE__, String)
+    end
+    _append_provenance(logBuf, xdmfPath, yamlPath, read(yamlPath, String), terminalText, scriptText)
 end
 
 # Run main on one YAML file, or on every YAML file in one folder.

@@ -1505,6 +1505,207 @@ if haveIO
         check("gallery_julia: every YAML loads as a config", okLoad)
     end
 
+    # ── Hierarchy ─────────────────────────────────────────────────────
+    # Write a hierarchy from one config. Then check every level against
+    # level 0 and against the level before it.
+    println("Hierarchy")
+    hierDir = joinpath(dir, "hier")
+    mkpath(hierDir)
+
+    # Return the barycentric coordinates of the point x in the simplex
+    # with the vertex rows P ((dim + 1) by dim).
+    function barycentric(P, x)
+        d = size(P, 2)
+        A = zeros(d + 1, d + 1)
+        for j in 1:d + 1
+            for i in 1:d
+                A[i, j] = P[j, i]
+            end
+            A[d + 1, j] = 1.0
+        end
+        return A \ vcat(x, 1.0)
+    end
+
+    # Count the boundary facets (edges in 2-D, faces in 3-D) of a level
+    # for each marker. A 2-D level has edge markers. A 3-D level has none,
+    # so the function returns the number of boundary faces under the key 0.
+    function boundary_counts(m)
+        counts = Dict{Int,Int}()
+        if m.dim == 2
+            for mk in m.edgeMk
+                mk != 0 && (counts[Int(mk)] = get(counts, Int(mk), 0) + 1)
+            end
+        else
+            counts[0] = length(boundary_faces(m.cells))
+        end
+        return counts
+    end
+
+    function check_hierarchy(name, yamlText, dim, nLevels; periodicAxes = ())
+        yaml = joinpath(hierDir, "$name.yaml")
+        write(yaml, yamlText)
+        redirect_stdout(devnull) do
+            W.main(yaml)
+        end
+        c = dim == 2 ? 4 : 8
+        levels = [W.load_mesh(joinpath(hierDir, "$(name)_L$(k).h5")) for k in 0:nLevels - 1]
+        m0 = levels[1]
+        check("hierarchy $name: no plain file is written", !isfile(joinpath(hierDir, "$name.h5")))
+        for k in 0:nLevels - 1
+            m = levels[k + 1]
+            tag = "hierarchy $name level $k"
+            h = m.hierarchy
+            check("$tag: the group has the right attributes",
+                  h !== nothing && h.level == k && h.nLevels == nLevels && h.refinement == "red" &&
+                  h.boundary == "frozen" && h.childrenPerCell == c)
+            check("$tag: the cell count is $c^$k times the level-0 count", size(m.cells, 1) == c^k * size(m0.cells, 1))
+            check("$tag: the volume equals the level-0 volume", abs(sum(m.cellVol) - sum(m0.cellVol)) < 1e-12 * sum(m0.cellVol))
+            check("$tag: every cell volume is positive", all(>(0), m.cellVol))
+            check("$tag: the obstacle records equal the level-0 records", m.obstacles == m0.obstacles)
+            check("$tag: the periodic flags equal the level-0 flags", m.periodic == m0.periodic)
+            if dim == 2
+                check("$tag: the smallest and largest angle equal the level-0 angles",
+                      abs(m.quality["min_angle_deg"] - m0.quality["min_angle_deg"]) < 1e-9 &&
+                      abs(m.quality["max_angle_deg"] - m0.quality["max_angle_deg"]) < 1e-9)
+                # An edge has a marker exactly when it has one cell.
+                nCellsOfEdge = zeros(Int, size(m.edges, 1))
+                for r in 1:size(m.c2e, 1), j in 1:3
+                    nCellsOfEdge[m.c2e[r, j]] += 1
+                end
+                check("$tag: every edge has 1 or 2 cells", all(x -> x == 1 || x == 2, nCellsOfEdge))
+                check("$tag: an edge has a marker exactly when it has one cell",
+                      all((nCellsOfEdge[e] == 1) == (m.edgeMk[e] != 0) for e in eachindex(nCellsOfEdge)))
+            else
+                fc = Dict{NTuple{3,Int},Int}()
+                for (key, v) in face_table(m.cells)
+                    fc[key] = length(v)
+                end
+                check("$tag: every face has 1 or 2 cells", all(x -> x == 1 || x == 2, values(fc)))
+            end
+            # Periodic pairs: one pair for each vertex on the low side.
+            for (d, dn) in enumerate(("x", "y", "z")[1:dim])
+                m.periodic[d] || continue
+                pr = m.perPairs[dn]
+                lo = count(v -> abs(m.pts[v, d]) < 1e-9, 1:size(m.pts, 1))
+                hi = count(v -> abs(m.pts[v, d] - m.boxLength[d]) < 1e-9, 1:size(m.pts, 1))
+                other = [q for q in 1:3 if q != d]
+                ok = size(pr, 1) == lo && lo == hi &&
+                     all(abs(m.pts[pr[r, 1], d]) < 1e-9 && abs(m.pts[pr[r, 2], d] - m.boxLength[d]) < 1e-9 &&
+                         all(abs(m.pts[pr[r, 1], q] - m.pts[pr[r, 2], q]) < 1e-9 for q in other) for r in 1:size(pr, 1))
+                check("$tag: periodic axis $dn has one pair for each low-side vertex", ok)
+            end
+            if k == 0
+                check("$tag: level 0 has no relation arrays", h.vertexParents === nothing && h.cellParent === nothing)
+                continue
+            end
+            coarse = levels[k]
+            nV = size(coarse.pts, 1)
+            nE = size(coarse.edges, 1)
+            vp = h.vertexParents
+            cp = h.cellParent
+            # Ordering contract.
+            check("$tag: the fine vertices are the coarse vertices, then one midpoint for each coarse edge",
+                  size(m.pts, 1) == nV + nE && m.pts[1:nV, 1:dim] == coarse.pts[:, 1:dim])
+            check("$tag: a coarse vertex is its own parent, twice", vp[1:nV, 1] == collect(1:nV) && vp[1:nV, 2] == collect(1:nV))
+            check("$tag: a midpoint has the two ends of its coarse edge", vp[nV + 1:nV + nE, :] == coarse.edges)
+            check("$tag: the children of coarse cell k are the rows $c(k-1)+1 to $c k", cp == [div(i - 1, c) + 1 for i in 1:size(m.cells, 1)])
+            # Frozen boundary: every fine vertex is the mean of its parents.
+            err = 0.0
+            for v in 1:size(m.pts, 1), q in 1:dim
+                err = max(err, abs(m.pts[v, q] - 0.5 * (coarse.pts[vp[v, 1], q] + coarse.pts[vp[v, 2], q])))
+            end
+            check("$tag: every vertex is the mean of its two parents", err < 1e-14)
+            # Nesting: the centroid of each child lies inside its parent,
+            # and the child volumes of one parent sum to the parent volume.
+            minBary = Inf
+            volSum = zeros(size(coarse.cells, 1))
+            for i in 1:size(m.cells, 1)
+                P = coarse.pts[coarse.cells[cp[i], :], 1:dim]
+                x = vec(sum(m.pts[m.cells[i, :], 1:dim], dims = 1)) / (dim + 1)
+                minBary = min(minBary, minimum(barycentric(P, x)))
+                volSum[cp[i]] += m.cellVol[i]
+            end
+            check("$tag: the centroid of each child lies inside its parent", minBary > -1e-12)
+            check("$tag: the child volumes sum to the parent volume", maximum(abs.(volSum .- coarse.cellVol) ./ coarse.cellVol) < 1e-12)
+            check("$tag: each child has 1/$c of the parent volume", maximum(abs.(m.cellVol .- coarse.cellVol[cp] ./ c) ./ m.cellVol) < 1e-9)
+            # Markers. A fine vertex with marker m is a coarse vertex with
+            # marker m. It can also be the midpoint of a coarse boundary
+            # edge with marker m (2-D). The boundary edges double in 2-D.
+            # The boundary faces multiply by 4 in 3-D.
+            if dim == 2
+                cc = boundary_counts(coarse); fc2 = boundary_counts(m)
+                okMk = true
+                for mk in union(keys(cc), keys(fc2))
+                    okMk &= get(fc2, mk, 0) == 2 * get(cc, mk, 0)
+                    okMk &= count(==(mk), m.ptMk) == count(==(mk), coarse.ptMk) + get(cc, mk, 0)
+                end
+                check("$tag: the boundary edges and the vertices of each marker grow as expected", okMk)
+            else
+                check("$tag: the boundary faces multiply by 4", boundary_counts(m)[0] == 4 * boundary_counts(coarse)[0])
+            end
+            # The vertex markers of the coarse vertices stay.
+            check("$tag: the coarse vertices keep their markers", m.ptMk[1:nV] == coarse.ptMk)
+            # The provenance of a fine level points to level 0.
+            xd = read(joinpath(hierDir, "$(name)_L$k.xdmf"), String)
+            check("$tag: the provenance points to level 0", occursin("$(name)_L0.xdmf", xd) && !occursin("package-free part: begins", xd))
+        end
+        x0 = read(joinpath(hierDir, "$(name)_L0.xdmf"), String)
+        check("hierarchy $name: level 0 keeps the writer source", occursin("package-free part: begins", x0))
+        return levels
+    end
+
+    hierCases2 = [
+        ("h_gridsplit_alt", "mesh_type: gridsplit\nbox_length: [1.0, 1.0]\nn_divisions: [3, 2]\nperiodic: [true, false]\ndiagonal: alternate\nhierarchy:\n  levels: 3\n"),
+        ("h_gridsplit_str", "mesh_type: gridsplit\nbox_length: [1.0, 1.0]\nn_divisions: [4, 3]\ndiagonal: slash\nstretching_ratio: [1.3, 1.5]\nstretching_symmetric: [false, true]\nhierarchy:\n  levels: 4\n"),
+        ("h_equilateral", "mesh_type: equilateral\nbox_length: [1.0, 0.866]\nn_divisions: [4, 4]\nperiodic: [false, true]\nhierarchy:\n  levels: 3\n"),
+        ("h_triangle_circle", "mesh_type: triangle\nbox_length: [1.0, 1.0]\nperiodic: [true, true]\nmesh_options:\n  mesh_size: 0.25\nobstacles:\n  - shape: circle\n    center: [0.5, 0.5]\n    radius: 0.15\nhierarchy:\n  levels: 3\n"),
+        ("h_triangle_rect", "mesh_type: triangle\nbox_length: [2.0, 1.0]\nmesh_options:\n  mesh_size: 0.3\nobstacles:\n  - shape: rectangle\n    center: [0.7, 0.5]\n    half_extents: [0.2, 0.15]\n  - shape: circle\n    center: [1.4, 0.5]\n    radius: 0.2\nhierarchy:\n  levels: 3\n"),
+    ]
+    hierLevels = Dict{String,Any}()
+    for (name, yamlText) in hierCases2
+        hierLevels[name] = check_hierarchy(name, yamlText, 2, W.load_config(joinpath(hierDir, (write(joinpath(hierDir, "$name.yaml"), yamlText); "$name.yaml")))["hierarchy"].levels)
+    end
+
+    # Level 0 of a hierarchy equals the mesh of the same config without the key.
+    let
+        txt = hierCases2[4][2]
+        plain = joinpath(hierDir, "h_plain.yaml")
+        write(plain, replace(txt, "hierarchy:\n  levels: 3\n" => ""))
+        redirect_stdout(devnull) do
+            W.main(plain)
+        end
+        mp = W.load_mesh(joinpath(hierDir, "h_plain.h5"))
+        m0 = hierLevels["h_triangle_circle"][1]
+        check("hierarchy: level 0 equals the mesh without the key",
+              mp.pts == m0.pts && mp.cells == m0.cells && mp.ptMk == m0.ptMk && mp.edgeMk == m0.edgeMk)
+        check("hierarchy: a mesh without the key has no hierarchy field", mp.hierarchy === nothing)
+        check("hierarchy: the config of a plain mesh has hierarchy nothing", W.load_config(plain)["hierarchy"] === nothing)
+    end
+
+    # Config errors.
+    let
+        ro = WCore._resolve_hierarchy_options
+        check("hierarchy config: a good mapping gives the defaults",
+              ro(Dict("levels" => 4)) == (levels = 4, boundary = "frozen", maxCells = 2000000))
+        check("hierarchy config: nothing stays nothing", ro(nothing) === nothing)
+        check("hierarchy config: levels is required", occursin("levels", errmsg(() -> ro(Dict("max_cells" => 10)))))
+        for bad in (0, -1, 2.5, "3", true)
+            check("hierarchy config: levels $(repr(bad)) is an error", raises(() -> ro(Dict("levels" => bad))))
+        end
+        check("hierarchy config: an unknown key is an error", occursin("unknown key 'depth'", errmsg(() -> ro(Dict("levels" => 2, "depth" => 1)))))
+        check("hierarchy config: projected is not available yet", occursin("not available yet", errmsg(() -> ro(Dict("levels" => 2, "boundary" => "projected")))))
+        check("hierarchy config: a bad boundary is an error", raises(() -> ro(Dict("levels" => 2, "boundary" => "round"))))
+        check("hierarchy config: max_cells 0 is an error", raises(() -> ro(Dict("levels" => 2, "max_cells" => 0))))
+        check("hierarchy config: a list is an error", raises(() -> ro([1, 2])))
+        yamlBig = joinpath(hierDir, "h_big.yaml")
+        write(yamlBig, "mesh_type: gridsplit\nbox_length: [1.0, 1.0]\nn_divisions: [4, 4]\nhierarchy:\n  levels: 6\n  max_cells: 1000\n")
+        msg = errmsg(() -> redirect_stdout(devnull) do
+            W.main(yamlBig)
+        end)
+        check("hierarchy: a size over max_cells stops with an error that names the limit", occursin("max_cells is 1000", msg))
+        check("hierarchy: the error writes no file", !isfile(joinpath(hierDir, "h_big_L0.h5")))
+    end
+
     # Regression against the reference outputs of the old files
     # (section 12.2.1 of the plan), when the folder is given.
     refDir = get(ENV, "WRITER_REF_DIR", "")
