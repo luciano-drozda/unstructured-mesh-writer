@@ -135,10 +135,10 @@ Notes on structured types
       unaffected.
 
       Every output tetrahedron is consistently oriented: vertices are
-      ordered so that det[v2-v1, v3-v1, v4-v1] < 0 for all cells,
-      regardless of cube position or 'diagonal' choice (chosen to match the
-      convention expected by /cell_vertex_normal's tetrahedron formula, see
-      'Vertex normals' below). Without this fix, exactly half of the 6 tets
+      ordered so that det[v2-v1, v3-v1, v4-v1] > 0 for all cells,
+      regardless of cube position or 'diagonal' choice (the same sign that
+      TetGen gives for 'tetra', and the one that /cell_vertex_normal's
+      tetrahedron formula expects, see 'Vertex normals' below). Without this fix, exactly half of the 6 tets
       per cube come out with the opposite handedness from the other half —
       an inherent property of enumerating all 6 axis-order permutations,
       not a bug tied to any one 'diagonal' mode.
@@ -194,11 +194,11 @@ Vertex normals
   sum_k S_k = 0 for that cell (a standard identity for the boundary of a
   closed simplex):
     3-D (tetra, local vertices 0,1,2,3; a=v1-v0, b=v2-v0, c=v3-v0):
-        S_3 = 0.5*(a x b)   S_1 = 0.5*(b x c)   S_2 = 0.5*(c x a)
+        S_3 = -0.5*(a x b)   S_1 = -0.5*(b x c)   S_2 = -0.5*(c x a)
         S_0 = -(S_1 + S_2 + S_3)
-      i.e. S_k is the area vector of the triangular face opposite vertex
-      k, for a tet ordered per each mesh_type's own orientation convention
-      (see the 'kuhn' note above for that type's choice).
+      i.e. S_k is the OUTWARD area vector of the triangular face opposite
+      vertex k, for a tet with positive orientation (det[a, b, c] > 0, as
+      for every 3-D mesh_type).
     2-D (triangle, local vertices 0,1,2):
         S_k = Rot90(v_(k+2) - v_(k+1)),  Rot90(x,y) = (y,-x)
       i.e. S_k is the outward length-vector of the edge opposite vertex k,
@@ -941,7 +941,7 @@ def _build_kuhn(cfg: dict):
 
     Orientation: every emitted tet is normalized (via a conditional vertex
     swap keyed on cube-offset parity and permutation parity) so that
-    det[v2-v1, v3-v1, v4-v1] < 0 for ALL cells -- see the module
+    det[v2-v1, v3-v1, v4-v1] > 0 for ALL cells -- see the module
     docstring's 'kuhn' note for why this sign was chosen.
     """
     Lx, Ly, Lz = cfg["box_length"]; nx, ny, nz = cfg["n_divisions"]
@@ -990,10 +990,10 @@ def _build_kuhn(cfg: dict):
                     for axis in perm:
                         cur[axis] = 1 - cur[axis]
                         tet.append(vid(i+cur[0], j+cur[1], k+cur[2]))
-                    # Force det[v1-v0,v2-v0,v3-v0] < 0 for every tet: natural
+                    # Force det[v1-v0,v2-v0,v3-v0] > 0 for every tet: natural
                     # sign = parity_o * perm_parity; swap the last two
-                    # vertices whenever that product would be positive.
-                    if parity_o * _KUHN_PERM_PARITY[perm_idx] > 0:
+                    # vertices whenever that product would be negative.
+                    if parity_o * _KUHN_PERM_PARITY[perm_idx] < 0:
                         tet[2], tet[3] = tet[3], tet[2]
                     cells.append(tet)
 
@@ -1277,9 +1277,10 @@ def _cell_vertex_normals(pts: np.ndarray, cells: np.ndarray, dim: int) -> np.nda
         v0, v1, v2, v3 = (pts[cells[:, 0]], pts[cells[:, 1]],
                           pts[cells[:, 2]], pts[cells[:, 3]])
         a, b, c = v1 - v0, v2 - v0, v3 - v0
-        S[:, 3] = 0.5 * np.cross(a, b)
-        S[:, 1] = 0.5 * np.cross(b, c)
-        S[:, 2] = 0.5 * np.cross(c, a)
+        # Outward area vectors for a positively oriented tet (det[a,b,c] > 0).
+        S[:, 3] = -0.5 * np.cross(a, b)
+        S[:, 1] = -0.5 * np.cross(b, c)
+        S[:, 2] = -0.5 * np.cross(c, a)
         S[:, 0] = -(S[:, 1] + S[:, 2] + S[:, 3])
 
     return S

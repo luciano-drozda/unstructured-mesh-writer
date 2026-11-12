@@ -5932,11 +5932,10 @@ function _h5_mesh_type(meshType::AbstractString)
     return "triangle"
 end
 
-# Return the name of the top XDMF grid. The name stays the name that the
-# old files wrote.
+# Return the name of the top XDMF grid. It is the same for every mesh
+# type, as in writer.py.
 function _xdmf_grid_name(meshType::AbstractString)
-    meshType in _delaunay_types() && return "MeshCollection"
-    return "MeshCollection_$meshType"
+    return "MeshCollection"
 end
 
 # Write one mesh with all its arrays to one HDF5 file.

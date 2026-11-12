@@ -6,8 +6,8 @@
 - `compare_h5.jl REF NEW [--ref-column-major]`: bit-by-bit comparison of the `.h5` files of two folders.
   Use the flag only for a reference written before schema version 1 (column-major matrices).
 - `compare_schema_py.py JULIA_DIR PYTHON_DIR`: compares every dataset and attribute of the Julia and the
-  Python output of the same configs, up to edge order. It needs h5py. Known differences, both by
-  convention: the edge order (Julia: first appearance, Python: sorted) and the sign of the 3-D cell
-  orientation (Julia positive, Python negative).
+  Python output of the same configs, up to edge order. It needs h5py. The one known difference, by
+  convention, is the edge order (Julia: first appearance, Python: sorted). The structured meshes agree
+  in every other dataset and attribute.
 - `check_style.py`, `dup_scan.py`, `check_ste.py`: checks of `writer.jl` (house style of the kernels,
   duplicate names, long sentences in comments). Usage: `python3 tools/check_style.py writer.jl`.

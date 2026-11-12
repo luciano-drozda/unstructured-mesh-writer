@@ -1108,6 +1108,7 @@ if haveIO
         xdmf = read(joinpath(dir, "$name.xdmf"), String)
         check("$name: the XDMF topology is $(dim == 2 ? "Triangle" : "Tetrahedron")",
               occursin("TopologyType=\"$(dim == 2 ? "Triangle" : "Tetrahedron")\"", xdmf))
+        check("$name: the top XDMF grid is named MeshCollection", occursin("<Grid Name=\"MeshCollection\" GridType=\"Collection\"", xdmf))
         check("$name: the provenance label WRITER.JL SOURCE is present", occursin("WRITER.JL SOURCE", xdmf))
         check("$name: the provenance holds the YAML text", occursin("YAML CONFIG: $name.yaml", xdmf))
     end
