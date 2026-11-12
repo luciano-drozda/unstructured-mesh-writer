@@ -1054,6 +1054,102 @@ msgBad = errmsg(() -> WCore._check_config(Dict{Any,Any}("mesh_type" => "hexa", "
 check("an unknown mesh_type lists the five valid values",
       msgBad !== nothing && all(occursin(t, msgBad) for t in WCore._mesh_types()))
 
+# ── Refinement kernels ───────────────────────────────────────────────────
+
+println("Refinement kernels")
+let
+    # Independent computations of the volume and of the cube of the
+    # mean-ratio shape measure of one tetrahedron.
+    tetVol(P) = abs(det(hcat(P[2, :] - P[1, :], P[3, :] - P[1, :], P[4, :] - P[1, :]))) / 6
+    function etaCube(P)
+        s = sum(norm(P[i, :] - P[j, :])^2 for i in 1:3 for j in i + 1:4)
+        return 15552 * tetVol(P)^2 / s^3
+    end
+    regular = [1.0 1.0 1.0; 1.0 -1.0 -1.0; -1.0 1.0 -1.0; -1.0 -1.0 1.0]
+    cellsR = reshape([1, 2, 3, 4], 1, 4)
+    out1 = zeros(1)
+    WCore.tet_shape_kernel(cellsR, regular, 1, out1)
+    check("tet_shape_kernel: a regular tetrahedron gives 1", abs(out1[1] - 1) < 1e-12)
+    flat = [0.0 0.0 0.0; 1.0 0.0 0.0; 0.0 1.0 0.0; 0.3 0.3 1e-6]
+    WCore.tet_shape_kernel(cellsR, flat, 1, out1)
+    check("tet_shape_kernel: a sliver gives a value near 0", out1[1] < 1e-4)
+
+    bey = WCore._bey_table()
+    check("the Bey table has 3 diagonals, 8 children and 4 codes in 1 to 10",
+          size(bey) == (3, 8, 4) && minimum(bey) == 1 && maximum(bey) == 10)
+    check("the corner children are the same for the 3 diagonals", bey[1, 1:4, :] == bey[2, 1:4, :] && bey[1, 1:4, :] == bey[3, 1:4, :])
+
+    rng = MersenneTwister(7)
+    nBad = 0
+    nMis = 0
+    for trial in 1:40
+        P = randn(rng, 4, 3)
+        tetVol(P) < 0.05 && continue
+        cells = reshape([1, 2, 3, 4], 1, 4)
+        edges, c2e = WCore._build_edge_registry(cells, 3)
+        ptsF = zeros(10, 3)
+        ptsF[1:4, :] = P
+        WCore.edge_midpoint_kernel(P, edges, 4, 6, 3, ptsF)
+        score = zeros(3)
+        for dg in 1:3
+            out = zeros(Int, 8, 4)
+            WCore.refine_tets_3d_kernel(cells, c2e, bey, [dg], 4, 1, out)
+            vols = [tetVol(ptsF[out[j, :], :]) for j in 1:8]
+            okVol = all(abs.(vols .- tetVol(P) / 8) .< 1e-12)
+            okIdx = all(1 .<= out .<= 10) && all(length(unique(out[j, :])) == 4 for j in 1:8)
+            # every child centroid lies inside the parent
+            okIn = all(minimum(let A = vcat(P', ones(1, 4)); A \ vcat(vec(sum(ptsF[out[j, :], :], dims = 1)) / 4, 1.0) end) > -1e-12 for j in 1:8)
+            (okVol && okIdx && okIn) || (nBad += 1)
+            score[dg] = minimum(etaCube(ptsF[out[j, :], :]) for j in 5:8)
+        end
+        etas = [zeros(8) for _ in 1:3]
+        for dg in 1:3
+            out = zeros(Int, 8, 4)
+            WCore.refine_tets_3d_kernel(cells, c2e, bey, [dg], 4, 1, out)
+            WCore.tet_shape_kernel(out, ptsF, 8, etas[dg])
+        end
+        sel = zeros(Int, 1)
+        WCore.diagonal_choice_kernel(etas[1], etas[2], etas[3], 1, sel)
+        sel[1] == argmax(score) || (nMis += 1)
+    end
+    check("refine_tets_3d_kernel: the children of random tetrahedra have 1/8 of the volume and lie in the parent", nBad == 0)
+    check("diagonal_choice_kernel: the choice equals a direct max-min computation on random tetrahedra", nMis == 0)
+
+    # A regular tetrahedron has 3 equal diagonals. The tie goes to diagonal 1.
+    edges, c2e = WCore._build_edge_registry(cellsR, 3)
+    ptsF = zeros(10, 3)
+    ptsF[1:4, :] = regular
+    WCore.edge_midpoint_kernel(regular, edges, 4, 6, 3, ptsF)
+    etas = [zeros(8) for _ in 1:3]
+    for dg in 1:3
+        out = zeros(Int, 8, 4)
+        WCore.refine_tets_3d_kernel(cellsR, c2e, bey, [dg], 4, 1, out)
+        WCore.tet_shape_kernel(out, ptsF, 8, etas[dg])
+    end
+    sel = zeros(Int, 1)
+    WCore.diagonal_choice_kernel(etas[1], etas[2], etas[3], 1, sel)
+    check("diagonal_choice_kernel: a tie goes to diagonal 1", sel[1] == 1)
+
+    # The corner children of the first level keep the angles of the parent.
+    check("refinement: the 4 corner children are similar to the parent",
+          let out = zeros(Int, 8, 4)
+              WCore.refine_tets_3d_kernel(cellsR, c2e, bey, [1], 4, 1, out)
+              all(abs(etaCube(ptsF[out[j, :], :]) - 1) < 1e-12 for j in 1:4)
+          end)
+    # A fixed diagonal gives a valid refinement of a whole mesh.
+    res = WCore._build_kuhn(IOBuffer(), WCore._check_config(Dict("mesh_type" => "kuhn", "box_length" => [1.0, 1.0, 1.0], "n_divisions" => [2, 2, 2])))
+    edgesK, c2eK = WCore._build_edge_registry(res.cells, 3)
+    resK = merge(res, (edges = edgesK, c2e = c2eK))
+    for rule in 0:3
+        fine, par = WCore._refine_mesh3(resK, rule)
+        meas = zeros(size(fine.cells, 1))
+        WCore.signed_measure_3d_kernel(fine.cells, fine.pts, size(fine.cells, 1), meas)
+        check("_refine_mesh3 with rule $rule: 8 times the cells, the same volume, all positive",
+              size(fine.cells, 1) == 8 * size(res.cells, 1) && all(>(0), meas) && abs(sum(meas) - 1.0) < 1e-12)
+    end
+    check("_refine_mesh3: a rule above 3 is an error", raises(() -> WCore._refine_mesh3(resK, 4)))
+end
+
 # ── Names ────────────────────────────────────────────────────────────────
 
 println("Duplicate names")
@@ -1581,6 +1677,29 @@ if haveIO
                     fc[key] = length(v)
                 end
                 check("$tag: every face has 1 or 2 cells", all(x -> x == 1 || x == 2, values(fc)))
+                # Independent marker rule: the marker of a vertex is the
+                # lowest marker of the boundary faces that contain it.
+                expected = zeros(Int, size(m.pts, 1))
+                for (key, v) in face_table(m.cells)
+                    length(v) == 1 || continue
+                    mks = [Int(m.ptMk[q]) for q in key]
+                    fm = 0
+                    if mks[1] >= 100 && mks[1] == mks[2] && mks[1] == mks[3]
+                        fm = mks[1]
+                    else
+                        for d in 1:3
+                            if all(abs(m.pts[q, d]) < 1e-9 for q in key)
+                                fm = 2d - 1; break
+                            elseif all(abs(m.pts[q, d] - m.boxLength[d]) < 1e-9 for q in key)
+                                fm = 2d; break
+                            end
+                        end
+                    end
+                    for q in key
+                        expected[q] = expected[q] == 0 ? fm : min(expected[q], fm)
+                    end
+                end
+                check("$tag: the vertex markers follow the lowest-marker rule of the boundary faces", Int.(m.ptMk) == expected)
             end
             # Periodic pairs: one pair for each vertex on the low side.
             for (d, dn) in enumerate(("x", "y", "z")[1:dim])
@@ -1666,6 +1785,23 @@ if haveIO
         hierLevels[name] = check_hierarchy(name, yamlText, 2, W.load_config(joinpath(hierDir, (write(joinpath(hierDir, "$name.yaml"), yamlText); "$name.yaml")))["hierarchy"].levels)
     end
 
+    hierCases3 = [
+        ("h_kuhn_main", "mesh_type: kuhn\nbox_length: [1.0, 1.0, 1.0]\nn_divisions: [2, 2, 2]\nperiodic: [true, false, true]\ndiagonal: main\nhierarchy:\n  levels: 3\n"),
+        ("h_kuhn_alt_str", "mesh_type: kuhn\nbox_length: [1.0, 1.0, 1.0]\nn_divisions: [2, 3, 2]\ndiagonal: alternate_layers\nstretching_ratio: [1.3, 1.0, 1.5]\nstretching_symmetric: [false, false, true]\nhierarchy:\n  levels: 3\n"),
+        ("h_tetra_plain", "mesh_type: tetra\nbox_length: [1.0, 1.0, 1.0]\nmesh_options:\n  mesh_size: 0.5\nhierarchy:\n  levels: 3\n"),
+        ("h_tetra_obs", "mesh_type: tetra\nbox_length: [2.0, 1.0, 1.0]\nperiodic: [false, true, true]\nmesh_options:\n  mesh_size: 0.5\n  mesh_size_obstacle: 0.3\nobstacles:\n  - shape: sphere\n    center: [0.7, 0.5, 0.5]\n    radius: 0.2\n  - shape: box\n    center: [1.4, 0.5, 0.5]\n    half_extents: [0.15, 0.2, 0.15]\nhierarchy:\n  levels: 3\n"),
+    ]
+    for (name, yamlText) in hierCases3
+        write(joinpath(hierDir, "$name.yaml"), yamlText)
+        hierLevels[name] = check_hierarchy(name, yamlText, 3, W.load_config(joinpath(hierDir, "$name.yaml"))["hierarchy"].levels)
+    end
+    # The max-min rule keeps the smallest dihedral angle of a Kuhn mesh on every level.
+    for k in 1:3
+        check("hierarchy h_kuhn_main level $(k - 1): the dihedral angles stay between 45 and 90 degrees",
+              abs(hierLevels["h_kuhn_main"][k].quality["min_dihedral_deg"] - 45) < 1e-6 &&
+              abs(hierLevels["h_kuhn_main"][k].quality["max_dihedral_deg"] - 90) < 1e-6)
+    end
+
     # Level 0 of a hierarchy equals the mesh of the same config without the key.
     let
         txt = hierCases2[4][2]
@@ -1679,6 +1815,16 @@ if haveIO
         check("hierarchy: level 0 equals the mesh without the key",
               mp.pts == m0.pts && mp.cells == m0.cells && mp.ptMk == m0.ptMk && mp.edgeMk == m0.edgeMk)
         check("hierarchy: a mesh without the key has no hierarchy field", mp.hierarchy === nothing)
+        txt3 = hierCases3[4][2]
+        plain3 = joinpath(hierDir, "h_plain3.yaml")
+        write(plain3, replace(txt3, "hierarchy:\n  levels: 3\n" => ""))
+        redirect_stdout(devnull) do
+            W.main(plain3)
+        end
+        mp3 = W.load_mesh(joinpath(hierDir, "h_plain3.h5"))
+        m03 = hierLevels["h_tetra_obs"][1]
+        check("hierarchy: level 0 of a tetra hierarchy equals the mesh without the key",
+              mp3.pts == m03.pts && mp3.cells == m03.cells && mp3.ptMk == m03.ptMk)
         check("hierarchy: the config of a plain mesh has hierarchy nothing", W.load_config(plain)["hierarchy"] === nothing)
     end
 

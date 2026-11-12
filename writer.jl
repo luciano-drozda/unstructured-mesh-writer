@@ -83,13 +83,17 @@ Keys in hierarchy (a mesh hierarchy for geometric multigrid):
                         Default: 2000000.
 The mesh that the other keys describe is level 0, the coarsest mesh.
 Level k comes from k red refinements. Each triangle gives 4 triangles.
+Each tetrahedron gives 8 tetrahedra.
 The files are stem_L0.h5, stem_L1.h5, and so on, with one XDMF file
 each. Every file has the group hierarchy. A file after level 0 has the
 datasets fine_vertex_parents (n_vertices by 2) and cell_parent
 (n_cells), 0-based. The fine vertices 1 to nV are the coarse vertices.
 The midpoint of coarse edge e is fine vertex nV + e. The children of
-coarse cell k are the rows 4 (k - 1) + 1 to 4 k. The writer makes no
-transfer operator. Only 2-D meshes support the key for now.
+coarse cell k are the rows c (k - 1) + 1 to c k. The number c is 4 in
+2-D and 8 in 3-D. The writer makes no transfer operator. A tetrahedron
+gives 8 tetrahedra (Bey). The writer picks the octahedron diagonal of
+each cell with the max-min rule. It keeps the diagonal whose worst
+interior child has the best mean-ratio shape.
 
 Markers: the 2-D box sides are 1 bottom, 2 right, 3 top, 4 left. The 3-D
 box faces are 1 xmin, 2 xmax, 3 ymin, 4 ymax, 5 zmin, 6 zmax. Obstacle
@@ -1870,6 +1874,120 @@ function refine_triangles_2d_kernel(cells, c2e, nV, nCells, out)
         out[r + 4, 1] = mab
         out[r + 4, 2] = mbc
         out[r + 4, 3] = mac
+    end
+    return nothing
+end
+
+# tet_shape_kernel(cells, pts, n, out)
+#
+# Write the cube of the mean-ratio shape measure of each tetrahedron.
+# The measure is 12 (3 V)^(2/3) divided by the sum of the squared edge
+# lengths. It is 1 for a regular tetrahedron and goes to 0 for a sliver.
+# The cube is 432 D^2 / S^3. D is the determinant of the 3 edge vectors
+# from vertex 1. S is the sum of the 6 squared edge lengths. The cube
+# keeps the order of the measure and needs no fractional power. The sign
+# of D does not matter.
+#
+# cells: n-by-4 cell-to-vertex array, 1-based
+# pts: vertex array with x, y, z in columns 1 to 3
+# n: number of cells
+# out: length-n output array
+function tet_shape_kernel(cells, pts, n, out)
+    for c = 1:n
+        a = cells[c, 1]
+        b = cells[c, 2]
+        d = cells[c, 3]
+        e = cells[c, 4]
+        # edge vectors from vertex 1
+        ux = pts[b, 1] - pts[a, 1]
+        uy = pts[b, 2] - pts[a, 2]
+        uz = pts[b, 3] - pts[a, 3]
+        vx = pts[d, 1] - pts[a, 1]
+        vy = pts[d, 2] - pts[a, 2]
+        vz = pts[d, 3] - pts[a, 3]
+        wx = pts[e, 1] - pts[a, 1]
+        wy = pts[e, 2] - pts[a, 2]
+        wz = pts[e, 3] - pts[a, 3]
+        det = ux * (vy * wz - vz * wy) - uy * (vx * wz - vz * wx) + uz * (vx * wy - vy * wx)
+        # sum of the 6 squared edge lengths
+        s = ux * ux + uy * uy + uz * uz
+        s += vx * vx + vy * vy + vz * vz
+        s += wx * wx + wy * wy + wz * wz
+        s += (vx - ux) * (vx - ux) + (vy - uy) * (vy - uy) + (vz - uz) * (vz - uz)
+        s += (wx - ux) * (wx - ux) + (wy - uy) * (wy - uy) + (wz - uz) * (wz - uz)
+        s += (wx - vx) * (wx - vx) + (wy - vy) * (wy - vy) + (wz - vz) * (wz - vz)
+        out[c] = 432.0 * det * det / (s * s * s)
+    end
+    return nothing
+end
+
+# refine_tets_3d_kernel(cells, c2e, bey, dgSel, nV, nCells, out)
+#
+# Split each tetrahedron into 8 tetrahedra (the method of Bey). Four
+# corner children keep one vertex of the parent each. An octahedron stays
+# between them. The diagonal dgSel[k] cuts it into 4 children. The
+# children of cell k are the rows 8k-7 to 8k of out. The table bey holds
+# a code for each vertex of each child. The codes 1 to 4 are the vertices
+# of the parent. The codes 5 to 10 are the midpoints of the local edges 1
+# to 6. A midpoint has the vertex number nV + 1 + c2e[k, code - 4].
+# The orientation of a child is not fixed here.
+#
+# cells: nCells-by-4 cell-to-vertex array, 1-based
+# c2e: nCells-by-6 cell-to-edge array, 0-based
+# bey: 3-by-8-by-4 table of codes (diagonal, child, vertex)
+# dgSel: diagonal (1, 2 or 3) of each cell
+# nV: number of vertices of the coarse mesh
+# nCells: number of coarse cells
+# out: 8 nCells-by-4 output array
+function refine_tets_3d_kernel(cells, c2e, bey, dgSel, nV, nCells, out)
+    # One fused loop over the cells, the 8 children and the 4 vertices.
+    for idx = 1:nCells * 32
+        k = div(idx - 1, 32) + 1
+        r = mod(idx - 1, 32)
+        j = div(r, 4) + 1
+        i = mod(r, 4) + 1
+        dg = dgSel[k]
+        code = bey[dg, j, i]
+        # 0 for a vertex code, 1 for a midpoint code
+        isMid = min(div(code - 1, 4), 1)
+        cv = min(code, 4)
+        cm = max(code - 4, 1)
+        va = cells[k, cv]
+        me = c2e[k, cm]
+        out[8 * (k - 1) + j, i] = (1 - isMid) * va + isMid * (nV + 1 + me)
+    end
+    return nothing
+end
+
+# diagonal_choice_kernel(eta1, eta2, eta3, nCells, dgSel)
+#
+# Choose the diagonal of each octahedron by the max-min rule. For each
+# diagonal, take the smallest shape value of the 4 interior children.
+# Keep the diagonal with the largest of these values. A tie goes to the
+# lowest diagonal number.
+#
+# eta1: shape values of the 8 children of each cell, for diagonal 1
+# eta2: the same for diagonal 2
+# eta3: the same for diagonal 3
+# nCells: number of coarse cells
+# dgSel: length-nCells output array with the chosen diagonal
+function diagonal_choice_kernel(eta1, eta2, eta3, nCells, dgSel)
+    for k = 1:nCells
+        r = 8 * (k - 1)
+        # the children 5 to 8 are the interior children
+        w1 = min(min(eta1[r + 5], eta1[r + 6]), min(eta1[r + 7], eta1[r + 8]))
+        w2 = min(min(eta2[r + 5], eta2[r + 6]), min(eta2[r + 7], eta2[r + 8]))
+        w3 = min(min(eta3[r + 5], eta3[r + 6]), min(eta3[r + 7], eta3[r + 8]))
+        best = 1
+        wBest = w1
+        if w2 > wBest
+            best = 2
+            wBest = w2
+        end
+        if w3 > wBest
+            best = 3
+        end
+        dgSel[k] = best
     end
     return nothing
 end
@@ -6233,6 +6351,124 @@ function _refine_mesh2(res)
     return resF, parents
 end
 
+# Return the table of the 8 children of a tetrahedron for each of the 3
+# diagonals of the octahedron. The entry (dg, j, i) is the code of vertex
+# i of child j. The codes 1 to 4 are the vertices of the parent. The codes
+# 5 to 10 are the midpoints of the local edges (1,2), (1,3), (1,4),
+# (2,3), (2,4) and (3,4). The children 1 to 4 are the corner children.
+# The children 5 to 8 cut the octahedron along its diagonal. The three
+# diagonals join the midpoints 5-10, 6-9 and 7-8.
+function _bey_table()
+    corners = [1 5 6 7; 2 5 8 9; 3 6 8 10; 4 7 9 10]
+    inner = [5 10 6 7; 5 10 7 9; 5 10 9 8; 5 10 8 6;
+             6 9 5 7; 6 9 7 10; 6 9 10 8; 6 9 8 5;
+             7 8 5 6; 7 8 6 10; 7 8 10 9; 7 8 9 5]
+    bey = zeros(Int, 3, 8, 4)
+    for dg in 1:3, j in 1:4, i in 1:4
+        bey[dg, j, i] = corners[j, i]
+        bey[dg, 4 + j, i] = inner[4 * (dg - 1) + j, i]
+    end
+    return bey
+end
+
+# Return the marker of a boundary face with the vertices a, b and c. A
+# face with three vertices of one obstacle (marker 100 or more) has the
+# marker of the obstacle. A face on a box side has the number of the
+# side, and the lowest number wins. The function returns 0 when no rule
+# applies.
+function _boundary_face_marker3(pts::Matrix{Float64}, ptMk::Vector{Int32}, box, a::Int, b::Int, c::Int)
+    ma = Int(ptMk[a])
+    if ma >= 100 && ma == ptMk[b] && ma == ptMk[c]
+        return ma
+    end
+    tol = 1e-9 * max(box[1], box[2], box[3])
+    for d in 1:3
+        if abs(pts[a, d]) < tol && abs(pts[b, d]) < tol && abs(pts[c, d]) < tol
+            return 2 * d - 1
+        end
+        if abs(pts[a, d] - box[d]) < tol && abs(pts[b, d] - box[d]) < tol && abs(pts[c, d] - box[d]) < tol
+            return 2 * d
+        end
+    end
+    return 0
+end
+
+# Refine a 3-D result record one time. The record must hold edges and c2e.
+# Return the fine record and a NamedTuple with the two parent arrays. The
+# argument fixedDiagonal is 0 for the max-min rule. The values 1, 2 and 3
+# force one diagonal for every cell. The marker of a midpoint is the lowest
+# marker of the boundary faces that contain its edge. A boundary face has
+# one cell.
+function _refine_mesh3(res, fixedDiagonal::Int = 0)
+    pts = res.pts::Matrix{Float64}
+    cells = res.cells::Matrix{Int}
+    ptMk = res.ptMk::Vector{Int32}
+    edges = res.edges::Matrix{Int}
+    c2e = res.c2e::Matrix{Int}
+    nV = size(pts, 1)
+    nC = size(cells, 1)
+    nE = size(edges, 1)
+    nF = nV + nE
+    0 <= fixedDiagonal <= 3 || error("fixedDiagonal must be 0, 1, 2 or 3")
+
+    ptsF = zeros(Float64, nF, 3)
+    ptsF[1:nV, :] = pts
+    edge_midpoint_kernel(pts, edges, nV, nE, 3, ptsF)
+
+    # Choose the diagonal of each cell. The midpoints are known, so the
+    # shape of every candidate child can be measured.
+    bey = _bey_table()
+    dgSel = fill(max(fixedDiagonal, 1), nC)
+    if fixedDiagonal == 0
+        cand = zeros(Int, 8 * nC, 4)
+        dgTry = zeros(Int, nC)
+        eta = [zeros(Float64, 8 * nC) for _ in 1:3]
+        for dg in 1:3
+            fill!(dgTry, dg)
+            refine_tets_3d_kernel(cells, c2e, bey, dgTry, nV, nC, cand)
+            tet_shape_kernel(cand, ptsF, 8 * nC, eta[dg])
+        end
+        diagonal_choice_kernel(eta[1], eta[2], eta[3], nC, dgSel)
+    end
+
+    cellsF = zeros(Int, 8 * nC, 4)
+    refine_tets_3d_kernel(cells, c2e, bey, dgSel, nV, nC, cellsF)
+    meas = zeros(Float64, 8 * nC)
+    signed_measure_3d_kernel(cellsF, ptsF, 8 * nC, meas)
+    fix_orientation_kernel(meas, 8 * nC, 4, cellsF)
+
+    # Markers of the midpoints.
+    nbr = _cell_neighbors3(cells)
+    localEdge = zeros(Int, 4, 4)
+    for (li, (p, q)) in enumerate(_tet_local_edges())
+        localEdge[p, q] = li
+        localEdge[q, p] = li
+    end
+    ptMkF = zeros(Int32, nF)
+    ptMkF[1:nV] = ptMk
+    nNoMarker = 0
+    for c in 1:nC, f in 1:4
+        nbr[c, f] == 0 || continue
+        fv = _face3(f)
+        mk = _boundary_face_marker3(pts, ptMk, res.boxSize, cells[c, fv[1]], cells[c, fv[2]], cells[c, fv[3]])
+        if mk == 0
+            nNoMarker += 1
+            continue
+        end
+        for (p, q) in ((fv[1], fv[2]), (fv[1], fv[3]), (fv[2], fv[3]))
+            m = nV + c2e[c, localEdge[p, q]] + 1
+            cur = ptMkF[m]
+            ptMkF[m] = cur == 0 ? Int32(mk) : Int32(min(Int(cur), mk))
+        end
+    end
+    nNoMarker == 0 || error("hierarchy: $nNoMarker boundary faces have no marker. The marker rule found neither an obstacle nor a box side.")
+
+    edgesF, c2eF = _build_edge_registry(cellsF, 3)
+    resF = merge(res, (pts = ptsF, cells = cellsF, ptMk = ptMkF, edges = edgesF, c2e = c2eF, info = nothing))
+    parents = (vertexParents = _vertex_parents(edges, nV), cellParent = _cell_parents(nC, 8))
+    return resF, parents
+end
+
 # Check the config value of the key hierarchy. Return nothing when the
 # key is absent. Otherwise return a NamedTuple with the fields levels,
 # boundary and maxCells.
@@ -6811,7 +7047,6 @@ function _write_hierarchy(logBuf::IOBuffer, yamlPath::AbstractString, stem::Abst
     H = cfg["hierarchy"]
     dim = cfg["dim"]
     children = dim == 2 ? 4 : 8
-    dim == 2 || error("hierarchy: 3-D meshes are not supported in this version")
     nCoarse = size(res.cells, 1)
     estimate = Float64(nCoarse) * Float64(children)^(H.levels - 1)
     if estimate > H.maxCells
