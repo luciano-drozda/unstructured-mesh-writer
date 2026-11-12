@@ -259,7 +259,10 @@ Obstacles (triangle / tetra only)
 
 HDF5 layout
 -----------
-  Attributes: mesh_type, dimension, box_length, n_vertices, n_cells, n_edges
+  Attributes: schema_version, mesh_type, dimension, box_length, n_vertices,
+              n_cells, n_edges
+  schema_version is 1: row-major (N, k) datasets and 0-based connectivity.
+  It increases when a dataset layout or a dataset meaning changes.
 
   /points              float64  (n_pts,  3)     z=0 for 2-D
   /cell_to_vertex      int64    (n_cells, d)    d=3 (tri) | 4 (tet)
@@ -1396,7 +1399,8 @@ def write_hdf5(h5_path: str,
     obstacles = obstacles or []
     kw = dict(compression="gzip", compression_opts=4)
     with h5py.File(h5_path, "w") as f:
-        f.attrs.update({"mesh_type" : "triangle" if dim==2 else "tetra",
+        f.attrs.update({"schema_version": 1,
+                        "mesh_type" : "triangle" if dim==2 else "tetra",
                         "dimension" : dim, "box_length": list(box),
                         "n_vertices": int(len(pts3d)), "n_cells": int(len(cells)),
                         "n_edges"   : int(len(edges))})

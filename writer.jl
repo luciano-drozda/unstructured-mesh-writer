@@ -74,6 +74,9 @@ shared vertex.
 Output: one HDF5 file and one XDMF file next to each YAML file. The
 attribute mesh_type of the HDF5 file names the cell type: triangle for
 every 2-D mesh and tetra for every 3-D mesh, as in writer.py.
+The attribute schema_version is 1, as in writer.py: row-major (N, k)
+datasets and 0-based connectivity. It increases when a dataset layout or
+a dataset meaning changes.
 The dataset boundary/edge_markers exists for 2-D meshes only. The group
 obstacles exists only when the config has obstacles.
 
@@ -5942,6 +5945,7 @@ function write_hdf5(logBuf::IOBuffer, h5Path, meshType, pts, cells, edges, c2e, 
                     periodic::Tuple, perPairs::Dict, allPairs, box::Tuple, dim::Int,
                     obstacles::Vector)
     h5open(h5Path, "w") do f
+        attrs(f)["schema_version"] = 1
         attrs(f)["mesh_type"] = _h5_mesh_type(meshType)
         attrs(f)["dimension"] = dim
         attrs(f)["box_length"] = collect(box)

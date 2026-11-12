@@ -1048,6 +1048,7 @@ if haveIO
         periodicAll = any(W.load_config(yaml)["periodic"])
         check("$name: all_pairs exists exactly when an axis is periodic", haskey(d1, "/periodicity/all_pairs") == periodicAll)
         check("$name: mesh_type attribute is $h5type", d1["@/mesh_type"] == h5type)
+        check("$name: schema_version attribute is 1", d1["@/schema_version"] == 1)
         check("$name: dimension attribute is $dim", d1["@/dimension"] == dim)
         check("$name: box_length attribute has $dim entries", length(d1["@/box_length"]) == dim)
         check("$name: edge markers exist only for a 2-D mesh", haskey(d1, "/boundary/edge_markers") == (dim == 2))

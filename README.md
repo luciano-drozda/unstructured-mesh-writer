@@ -24,12 +24,12 @@ Connectivity is 0-based. In Julia, load a dataset with `_read_ds` to get the arr
 | `vertex_to_vertex` | (nEdges, 2) | Edge end vertices, smaller first. |
 | `vertex_to_cell/offsets`, `.../indices` | (nVertices+1), (nIndices) | Cells around each vertex, in CSR form. |
 | `cell_vol`, `vertex_vol` | (nCells), (nVertices) | Cell and dual vertex measures. |
-| `cell_vertex_normal` | (nCells, dim+1, 3) | Normal of the face opposite each local vertex. |
+| `cell_vertex_normal` | (nCells, dim+1, 3) | Per cell and local vertex, the area vector of the face opposite that vertex. Not summed onto global vertices. |
 | `boundary/point_markers` | (nVertices) | Box side or obstacle marker, 0 inside. |
 | `boundary/edge_markers` | (nEdges) | The same for edges; 2-D only. |
 | `periodicity/*_pairs`, `all_pairs` | (nPairs, 2) | Periodic vertex pairs; only for periodic axes. |
 
-Attributes: `mesh_type` (`triangle` for every 2-D mesh, `tetra` for every 3-D mesh), `dimension`,
+Attributes: `schema_version` (1: row-major matrices, 0-based connectivity; it increases when a layout or a meaning changes), `mesh_type` (`triangle` for every 2-D mesh, `tetra` for every 3-D mesh), `dimension`,
 `box_length`, `n_vertices`, `n_cells`, `n_edges`.
 
 ## Tests
