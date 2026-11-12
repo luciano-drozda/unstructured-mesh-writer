@@ -6553,14 +6553,23 @@ end
 # ── Entry point ───────────────────────────────────────────────────────────
 
 # Build one mesh from one YAML config. Write the output files. Every mesh
-# type goes through the same steps after the builder.
+# type goes through the same steps after the builder, in _write_level.
 function main(yamlPath::AbstractString)
     logBuf = IOBuffer()
     cfg = load_config(yamlPath)
-    mt, dim, per, box = cfg["mesh_type"], cfg["dim"], cfg["periodic"], cfg["box_length"]
-
-    _log(logBuf, "Building '$mt' mesh …")
+    _log(logBuf, "Building '$(cfg["mesh_type"])' mesh …")
     res = _build_mesh(logBuf, cfg)
+    _write_level(logBuf, yamlPath, replace(yamlPath, r"\.ya?ml$" => ""), cfg, res)
+    return nothing
+end
+
+# Run the steps after the builder on one result record. The function
+# computes the edges, the volumes, the normals, the quality, the
+# vertex-to-cell lists and the periodic pairs. Then it writes the HDF5
+# file and the XDMF file with the path stem (no extension) and appends
+# the provenance record. yamlPath names the config for the provenance.
+function _write_level(logBuf::IOBuffer, yamlPath::AbstractString, stem::AbstractString, cfg::Dict, res)
+    mt, dim, per, box = cfg["mesh_type"], cfg["dim"], cfg["periodic"], cfg["box_length"]
     cells = res.cells::Matrix{Int}
     resPts = res.pts::Matrix{Float64}
     ptMk = res.ptMk::Vector{Int32}
@@ -6622,8 +6631,8 @@ function main(yamlPath::AbstractString)
     cellsOut = cells .- 1
     edgesOut = edges .- 1
 
-    hdf5Path = replace(yamlPath, r"\.ya?ml$" => ".h5")
-    xdmfPath = replace(yamlPath, r"\.ya?ml$" => ".xdmf")
+    hdf5Path = stem * ".h5"
+    xdmfPath = stem * ".xdmf"
     write_hdf5(logBuf, hdf5Path, mt, pts3d, cellsOut, edgesOut, c2e, cellVol, cvn, vertexVol,
                v2cOff, v2cIdx, ptMk, edgeMk, quality, per, perPairs, allPairs, box, dim,
                res.obstacles)
