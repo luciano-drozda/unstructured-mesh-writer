@@ -11,3 +11,4 @@
   in every other dataset and attribute.
 - `check_style.py`, `dup_scan.py`, `check_ste.py`: checks of `writer.jl` (house style of the kernels,
   duplicate names, long sentences in comments). Usage: `python3 tools/check_style.py writer.jl`.
+- `quality_stats.py FOLDER`: dihedral statistics of every tetrahedral `.h5` file in a folder. It works for the files of both writers.

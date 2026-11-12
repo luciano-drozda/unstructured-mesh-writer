@@ -51,6 +51,34 @@ A flip is kept only when the new cells fill the same space with a positive volum
 and the radius-edge ratio stays within the larger of the old ratio and `radius_edge_bound`. The smoothing sweeps run after the flips.
 In the 10 reference `tetra` meshes the number of cells below 10 degrees fell from 210 to 4. `writer.py` has no such step.
 
+## Known limitations of `writer.py`
+
+Status: documented on 2026-11-12. These problems are not fixed. The work now focuses on `writer.jl`. `writer.py` is unchanged.
+
+### 1. Slivers in `tetra` meshes
+
+`writer.py` calls TetGen with the options `pqe` and does not improve the mesh afterwards. The meshes keep slivers.
+I ran `writer.py` on 9 box configs (with and without a sphere) of 1,310 to 23,441 cells and ran `writer.jl` on 9 comparable configs.
+The numbers come from `tools/quality_stats.py`.
+
+| | Smallest dihedral angle | Cells below 10 degrees | Largest dihedral angle |
+|---|---|---|---|
+| `writer.py` | 1.6 to 6.3 degrees | 1 to 53 per mesh (0.1 to 0.5 percent) | up to 176.9 degrees |
+| `writer.jl` with `min_dihedral: 0` | 0.6 to 6.9 degrees | 10 to 67 per mesh (0.2 to 0.75 percent) | up to 179.1 degrees |
+| `writer.jl`, default | 10.06 to 10.79 degrees | none | 161 to 164.7 degrees |
+
+The same box therefore gets a different mesh quality from the two writers. The attributes `min_dihedral_deg`, `max_dihedral_deg` and `max_radius_edge_ratio` in the HDF5 file show the effect.
+An idea that I did not test: TetGen may accept a minimum dihedral angle in its `q` switch (from memory, not verified).
+
+### 2. Periodic `tetra` meshes are not periodic
+
+With `periodic: [true, true, true]` and `mesh_type: tetra`, `writer.py` prints warnings such as `periodic_x: 45 lo vs 48 hi vertices`.
+The opposite faces then have different vertex sets, so the pairs in `/periodicity` are incomplete.
+The periodic and the non-periodic meshes of the same config had the same cell count and the same quality values. The request for periodicity had no effect on the mesh.
+`writer.jl` makes matching faces. Its tests check them.
+The likely cause is that TetGen refines the boundary of each face on its own. I did not verify this.
+Do not use periodic `tetra` meshes from `writer.py` without a check of the pairs.
+
 ## Julia environment
 
 `Project.toml` and `Manifest.toml` pin the Julia packages: YAML 0.4.17 and HDF5 0.17.4, with every package they need.
