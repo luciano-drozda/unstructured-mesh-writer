@@ -61,6 +61,11 @@ Keys in mesh_options:
     radius_edge_bound   tetra only. Largest allowed ratio of the
                         circumradius to the shortest edge. The value
                         must be 2.0 or more. Default: 2.0.
+    min_dihedral        tetra only. Goal for the smallest dihedral angle,
+                        in degrees. Flips of faces and edges try to
+                        remove the cells below the goal. The goal is not
+                        a guarantee. The value must be in [0, 60]. The
+                        value 0 turns the flips off. Default: 10.0.
     smoothing_sweeps    Number of Jacobi smoothing sweeps. Default: 3.
     max_vertices        Safety limit on the vertex count.
                         Default: 2000000 for triangle, 1000000 for tetra.
@@ -1741,6 +1746,44 @@ function tet_dihedral_kernel(cells, pts, n, minD, maxD)
         cmin = min(min(min(d12, d13), min(d14, d23)), min(d24, d34))
         minD[c] = acos(min(max(cmax, -1.0), 1.0))
         maxD[c] = acos(min(max(cmin, -1.0), 1.0))
+    end
+    return nothing
+end
+
+# group_extrema_kernel(vals, idx, start, count, nG, outMin, outMax, outSum)
+#
+# Reduce each group of numbers to its smallest value, its largest value
+# and its sum. Group g holds the numbers vals[idx[k]], with k from
+# start[g] up to start[g] + count[g] - 1. Each group has at least one
+# member. The groups are independent of each other.
+#
+# vals: array of numbers
+# idx: list of positions in vals, group after group
+# start: length-nG array, position in idx of the first member of each group
+# count: length-nG array, number of members of each group
+# nG: number of groups
+# outMin: length-nG output array for the smallest value of each group
+# outMax: length-nG output array for the largest value of each group
+# outSum: length-nG output array for the sum of each group
+function group_extrema_kernel(vals, idx, start, count, nG, outMin, outMax, outSum)
+    for g = 1:nG
+        k0 = start[g]
+        j0 = idx[k0]
+        lo = vals[j0]
+        hi = vals[j0]
+        total = 0.0
+        # running reduction over the members of one group, carried
+        # between the inner iterations
+        for k = k0:k0 + count[g] - 1
+            j = idx[k]
+            v = vals[j]
+            lo = min(lo, v)
+            hi = max(hi, v)
+            total += v
+        end
+        outMin[g] = lo
+        outMax[g] = hi
+        outSum[g] = total
     end
     return nothing
 end
@@ -5087,7 +5130,7 @@ end
 # Check the mesh_options record. Set the defaults. Return a NamedTuple.
 function _resolve_mesh_options3(raw)
     raw isa AbstractDict || error("'mesh_options' must be a mapping")
-    known = ("mesh_size", "mesh_size_obstacle", "grading", "radius_edge_bound", "smoothing_sweeps", "max_vertices")
+    known = ("mesh_size", "mesh_size_obstacle", "grading", "radius_edge_bound", "smoothing_sweeps", "max_vertices", "min_dihedral")
     for k in keys(raw)
         k in known || error("mesh_options: unknown key '$k'. Valid keys: $(join(known, ", "))")
     end
@@ -5109,8 +5152,11 @@ function _resolve_mesh_options3(raw)
     (sweeps >= 0 && sweeps == floor(sweeps)) || error("mesh_options['smoothing_sweeps'] must be a whole number, 0 or more")
     maxVertices = num("max_vertices", 1000000)
     (maxVertices >= 100 && maxVertices == floor(maxVertices)) || error("mesh_options['max_vertices'] must be a whole number, 100 or more")
+    minDihedral = num("min_dihedral", 10.0)
+    (minDihedral >= 0 && minDihedral <= 60) || error("mesh_options['min_dihedral'] must be in [0, 60]")
     return (meshSize = meshSize, meshSizeObstacle = meshSizeObs, grading = grading,
-            radiusEdgeBound = bound, smoothingSweeps = Int(sweeps), maxVertices = Int(maxVertices))
+            radiusEdgeBound = bound, smoothingSweeps = Int(sweeps), maxVertices = Int(maxVertices),
+            minDihedral = minDihedral)
 end
 
 # Check each obstacle record. Raise an error for a bad field, for an
@@ -5228,14 +5274,266 @@ function _max_ratio3(pts::Matrix{Float64}, cells::Matrix{Int})
 end
 
 # Return the smallest and the largest dihedral angle of all cells, in
-# degrees, and the number of cells with a dihedral angle below 10 degrees.
-function _dihedral_stats3(pts::Matrix{Float64}, cells::Matrix{Int})
+# degrees. Also return the number of cells with a dihedral angle below
+# goalRad. The goal is in radians.
+function _dihedral_stats3(pts::Matrix{Float64}, cells::Matrix{Int}, goalRad::Float64)
     m = size(cells, 1)
     minD = zeros(Float64, m)
     maxD = zeros(Float64, m)
     tet_dihedral_kernel(cells, pts, m, minD, maxD)
-    nLow = count(<(deg2rad(10.0)), minD)
+    nLow = count(<(goalRad), minD)
     return rad2deg(minimum(minD)), rad2deg(maximum(maxD)), nLow
+end
+
+# Compute four numbers for each tetrahedron: the smallest and the largest
+# dihedral angle in radians, the signed volume, and the radius-edge ratio.
+# The function calls the kernels that the writer uses everywhere.
+function _cell_numbers3(pts::Matrix{Float64}, cells::Matrix{Int})
+    n = size(cells, 1)
+    minD = zeros(Float64, n)
+    maxD = zeros(Float64, n)
+    vol = zeros(Float64, n)
+    tet_dihedral_kernel(cells, pts, n, minD, maxD)
+    signed_measure_3d_kernel(cells, pts, n, vol)
+    ids = collect(1:n)
+    vx = pts[:, 1]; vy = pts[:, 2]; vz = pts[:, 3]
+    ccx = zeros(Float64, n); ccy = zeros(Float64, n); ccz = zeros(Float64, n); ccR = zeros(Float64, n)
+    cell_circumcenter_3d_kernel(cells, vx, vy, vz, ids, n, ccx, ccy, ccz, ccR)
+    ratio = zeros(Float64, n)
+    sizeRatio = zeros(Float64, n)
+    cell_quality_3d_kernel(cells, vx, vy, vz, ids, n, ccR, ones(Float64, n), ratio, sizeRatio)
+    return minD, maxD, vol, ratio
+end
+
+# Pack the three vertex numbers of a face into one integer. The integer
+# does not depend on the order of the numbers. Each number must be below 2^21.
+function _face_key3(a::Int, b::Int, c::Int)
+    lo = min(a, min(b, c))
+    hi = max(a, max(b, c))
+    mid = a + b + c - lo - hi
+    return (lo << 42) | (mid << 21) | hi
+end
+
+# Return the neighbor array of a cell list. Entry [c, f] is the cell on the
+# other side of local face f of cell c. It is 0 for a boundary face.
+function _cell_neighbors3(cells::Matrix{Int})
+    n = size(cells, 1)
+    keys = Vector{Int}(undef, 4 * n)
+    for c in 1:n, f in 1:4
+        fv = _face3(f)
+        keys[4 * (c - 1) + f] = _face_key3(cells[c, fv[1]], cells[c, fv[2]], cells[c, fv[3]])
+    end
+    perm = sortperm(keys)
+    nbr = zeros(Int, n, 4)
+    j = 1
+    while j < 4 * n
+        if keys[perm[j]] == keys[perm[j + 1]]
+            p = perm[j]; q = perm[j + 1]
+            cp = div(p - 1, 4) + 1; fp = mod(p - 1, 4) + 1
+            cq = div(q - 1, 4) + 1; fq = mod(q - 1, 4) + 1
+            nbr[cp, fp] = cq
+            nbr[cq, fq] = cp
+            j += 2
+        else
+            j += 1
+        end
+    end
+    return nbr
+end
+
+# Walk around the edge between local vertices i and j of cell c. Return
+# the cells around the edge when they form a closed ring of exactly 3
+# cells. Otherwise return an empty list. A boundary face or a longer ring
+# gives an empty list.
+function _edge_ring3(cells::Matrix{Int}, nbr::Matrix{Int}, c::Int, i::Int, j::Int)
+    u = cells[c, i]; w = cells[c, j]
+    keep = 0; leave = 0
+    for t in 1:4
+        (t == i || t == j) && continue
+        keep == 0 ? (keep = cells[c, t]) : (leave = cells[c, t])
+    end
+    ring = Int[c]
+    cur = c
+    for step in 1:3
+        # leave the cell through the face opposite the vertex `leave`
+        fl = 0
+        for t in 1:4
+            cells[cur, t] == leave && (fl = t)
+        end
+        nxt = nbr[cur, fl]
+        nxt == 0 && return Int[]
+        if nxt == c
+            return step == 3 ? ring : Int[]
+        end
+        step == 3 && return Int[]
+        push!(ring, nxt)
+        # the new cell holds the vertex `keep` and one new vertex z
+        z = 0
+        for t in 1:4
+            v = cells[nxt, t]
+            (v != u && v != w && v != keep) && (z = v)
+        end
+        leave = keep
+        keep = z
+        cur = nxt
+    end
+    return Int[]
+end
+
+# Make one pass of flips on a cell list. A flip changes the cells around
+# one face (2 cells become 3) or around one edge (3 cells become 2). It
+# does not move a vertex. The pass tries each flip that touches a cell
+# with a dihedral angle below the goal.
+# The pass keeps a flip only when all of these are true:
+#   1. The new cells have a positive volume and fill the same space.
+#   2. The smallest dihedral angle is at least gainMin higher.
+#   3. The radius-edge ratio stays within the larger of the old ratio
+#      and ratioBound.
+# Flips that share a cell do not run in the same pass. Return the new
+# cell list, the number of candidates and the number of flips done.
+# The vector why counts the failed candidates by test. Entry 1 is for
+# test 1. Entry 2 is for test 3. Entry 3 is for test 2.
+function _flip_pass3(pts::Matrix{Float64}, cells::Matrix{Int}, goalRad::Float64, ratioBound::Float64, gainMin::Float64,
+                     why::Vector{Int} = zeros(Int, 4))
+    nC = size(cells, 1)
+    size(pts, 1) < 2^21 || return cells, 0, 0
+    minD, maxD, vol, ratio = _cell_numbers3(pts, cells)
+    bad = Int[c for c in 1:nC if minD[c] < goalRad]
+    isempty(bad) && return cells, 0, 0
+    nbr = _cell_neighbors3(cells)
+
+    # ---- List the candidates. Kind 1 is a 2-3 flip. Kind 3 is a 3-2 flip.
+    newRows = Vector{NTuple{4,Int}}()
+    newStart = Int[]; newCount = Int[]
+    oldIdx = Int[]; oldStart = Int[]; oldCount = Int[]
+    kind = Int[]
+    addCand(k, tets, olds) = begin
+        push!(kind, k)
+        push!(newStart, length(newRows) + 1); push!(newCount, length(tets))
+        append!(newRows, tets)
+        push!(oldStart, length(oldIdx) + 1); push!(oldCount, length(olds))
+        append!(oldIdx, olds)
+    end
+    for c in bad
+        for f in 1:4
+            d = nbr[c, f]
+            d == 0 && continue
+            fv = _face3(f)
+            a = cells[c, f]
+            p = cells[c, fv[1]]; q = cells[c, fv[2]]; r = cells[c, fv[3]]
+            b = 0
+            for t in 1:4
+                v = cells[d, t]
+                (v != p && v != q && v != r) && (b = v)
+            end
+            addCand(1, [(p, q, a, b), (q, r, a, b), (r, p, a, b)], [c, d])
+        end
+        for (i, j) in _tet_local_edges()
+            ring = _edge_ring3(cells, nbr, c, i, j)
+            isempty(ring) && continue
+            u = cells[c, i]; w = cells[c, j]
+            rv = Int[]
+            for cc in ring, t in 1:4
+                v = cells[cc, t]
+                (v != u && v != w && !(v in rv)) && push!(rv, v)
+            end
+            length(rv) == 3 || continue
+            addCand(3, [(rv[1], rv[2], rv[3], u), (rv[1], rv[2], rv[3], w)], ring)
+        end
+    end
+    nG = length(kind)
+    nG == 0 && return cells, 0, 0
+    nNew = length(newRows)
+    cand = Matrix{Int}(undef, nNew, 4)
+    for k in 1:nNew
+        cand[k, 1], cand[k, 2], cand[k, 3], cand[k, 4] = newRows[k]
+    end
+
+    # ---- Give each new cell a positive orientation. A candidate can fill
+    # a different space than the old cells. Then the sum of the positive
+    # volumes differs from the old sum, and the volume test below fails it.
+    cvol = zeros(Float64, nNew)
+    signed_measure_3d_kernel(cand, pts, nNew, cvol)
+    for k in 1:nNew
+        if cvol[k] < 0
+            cand[k, 3], cand[k, 4] = cand[k, 4], cand[k, 3]
+        end
+    end
+    cD, cDmax, cvol, cratio = _cell_numbers3(pts, cand)
+
+    # ---- Reduce the numbers of the new and of the old cells.
+    idNew = collect(1:nNew)
+    lo = zeros(Float64, nG); hi = zeros(Float64, nG); sm = zeros(Float64, nG)
+    newVolMin = zeros(Float64, nG); newVolSum = zeros(Float64, nG)
+    group_extrema_kernel(cvol, idNew, newStart, newCount, nG, newVolMin, hi, newVolSum)
+    newDMin = zeros(Float64, nG)
+    group_extrema_kernel(cD, idNew, newStart, newCount, nG, newDMin, hi, sm)
+    newRatioMax = zeros(Float64, nG)
+    group_extrema_kernel(cratio, idNew, newStart, newCount, nG, lo, newRatioMax, sm)
+    oldVolSum = zeros(Float64, nG)
+    group_extrema_kernel(vol, oldIdx, oldStart, oldCount, nG, lo, hi, oldVolSum)
+    oldDMin = zeros(Float64, nG)
+    group_extrema_kernel(minD, oldIdx, oldStart, oldCount, nG, oldDMin, hi, sm)
+    oldRatioMax = zeros(Float64, nG)
+    group_extrema_kernel(ratio, oldIdx, oldStart, oldCount, nG, lo, oldRatioMax, sm)
+
+    # ---- Accept the good candidates. Sort them by gain.
+    gain = fill(-Inf, nG)
+    for g in 1:nG
+        if !(newVolMin[g] > 1e-10 * oldVolSum[g] && abs(newVolSum[g] - oldVolSum[g]) <= 1e-9 * oldVolSum[g])
+            why[1] += 1
+            continue
+        end
+        if newRatioMax[g] > max(oldRatioMax[g], ratioBound)
+            why[2] += 1
+            continue
+        end
+        gn = newDMin[g] - oldDMin[g]
+        if gn >= gainMin
+            gain[g] = gn
+        else
+            why[3] += 1
+        end
+    end
+    order = sortperm(gain; rev = true)
+
+    # ---- Do the flips that do not share a cell.
+    locked = falses(nC)
+    dead = falses(nC)
+    out = copy(cells)
+    extra = Vector{NTuple{4,Int}}()
+    nDone = 0
+    for g in order
+        gain[g] == -Inf && break
+        olds = oldIdx[oldStart[g]:oldStart[g] + oldCount[g] - 1]
+        any(locked[o] for o in olds) && continue
+        for o in olds
+            locked[o] = true
+        end
+        rows = newStart[g]:newStart[g] + newCount[g] - 1
+        for (n, o) in enumerate(olds)
+            if n <= length(rows)
+                out[o, :] = cand[rows[n], :]
+            else
+                dead[o] = true
+            end
+        end
+        if kind[g] == 1
+            k = rows[3]
+            push!(extra, (cand[k, 1], cand[k, 2], cand[k, 3], cand[k, 4]))
+        end
+        nDone += 1
+    end
+    keepRows = Int[c for c in 1:nC if !dead[c]]
+    out = out[keepRows, :]
+    if !isempty(extra)
+        add = Matrix{Int}(undef, length(extra), 4)
+        for (k, t) in enumerate(extra)
+            add[k, 1], add[k, 2], add[k, 3], add[k, 4] = t
+        end
+        out = vcat(out, add)
+    end
+    return out, nG, nDone
 end
 
 # Build the tetrahedral mesh of a box with obstacles. Return the vertex
@@ -5246,11 +5544,13 @@ end
 # obsKind, obsCx, ..., obsHz: flat obstacle arrays. Kind 1 is a sphere.
 #   Kind 2 is a box.
 # hMax, hObs, grading, ratioBound, sweeps, maxVertices: the mesh options
+# minDihedral: goal for the smallest dihedral angle, in degrees. The flip
+#   pass runs when it is above 0.
 function _triangulate_domain3(logBuf::IOBuffer, L::NTuple{3,Float64}, per::NTuple{3,Bool},
                               obsKind::Vector{Int}, obsCx::Vector{Float64}, obsCy::Vector{Float64}, obsCz::Vector{Float64},
                               obsHx::Vector{Float64}, obsHy::Vector{Float64}, obsHz::Vector{Float64},
                               hMax::Float64, hObs::Float64, grading::Float64, ratioBound::Float64,
-                              sweeps::Int, maxVertices::Int)
+                              sweeps::Int, maxVertices::Int, minDihedral::Float64 = 0.0)
     nObs = length(obsKind)
     hObsUsed = nObs == 0 ? hMax : hObs
     M = _new_mesher3(4096, 16384, 1024, 1024, maxVertices)
@@ -5341,6 +5641,23 @@ function _triangulate_domain3(logBuf::IOBuffer, L::NTuple{3,Float64}, per::NTupl
         _log(logBuf, "  [warn] tetra: $(nNeg[1]) cells had a negative volume. The writer reordered them.")
         fix_orientation_kernel(meas, nCells, 4, cells)
     end
+
+    # ---- Flip the cells around slivers. Each pass flips faces and edges
+    # of the cells below the goal. The vertices stay where they are.
+    reportRad = deg2rad(minDihedral > 0 ? minDihedral : 10.0)
+    nBelowStart = _dihedral_stats3(pts, cells, reportRad)[3]
+    flipsDone = 0
+    if minDihedral > 0
+        for pass in 1:10
+            why = zeros(Int, 4)
+            cells, nTried, nDone = _flip_pass3(pts, cells, deg2rad(minDihedral), ratioBound, deg2rad(1.0), why)
+            _log(logBuf, "  flip pass $pass: $nTried candidates, $nDone flips. Rejected: $(why[1]) by volume, $(why[2]) by radius-edge ratio, $(why[3]) by angle gain")
+            flipsDone += nDone
+            nDone == 0 && break
+        end
+        nCells = size(cells, 1)
+        meas = zeros(Float64, nCells)
+    end
     edges, c2e = _build_edge_registry(cells, 3)
     nEdges = size(edges, 1)
 
@@ -5365,7 +5682,7 @@ function _triangulate_domain3(logBuf::IOBuffer, L::NTuple{3,Float64}, per::NTupl
     avgPts = zeros(Float64, nPts, 3)
     newPts = zeros(Float64, nPts, 3)
     v2cOff, v2cIdx = _vertex_to_cell(nPts, cells)
-    minDeg, maxDeg, nLow = _dihedral_stats3(pts, cells)
+    minDeg, maxDeg, nLow = _dihedral_stats3(pts, cells, reportRad)
     sweepsDone = 0
     for _ in 1:sweeps
         smooth_jacobi_3d_kernel(pts, nbrOff, nbrIdx, nPts, avgPts)
@@ -5379,7 +5696,7 @@ function _triangulate_domain3(logBuf::IOBuffer, L::NTuple{3,Float64}, per::NTupl
             nNeg[1] = 0
             count_negative_kernel(meas, nCells, nNeg)
             if nNeg[1] == 0
-                minNew, maxNew, nLowNew = _dihedral_stats3(newPts, cells)
+                minNew, maxNew, nLowNew = _dihedral_stats3(newPts, cells, reportRad)
                 if minNew >= minDeg
                     pts, newPts = newPts, pts
                     minDeg, maxDeg, nLow = minNew, maxNew, nLowNew
@@ -5395,7 +5712,8 @@ function _triangulate_domain3(logBuf::IOBuffer, L::NTuple{3,Float64}, per::NTupl
     maxRatio = _max_ratio3(pts, cells)
 
     info = (nVertices = nPts, nCells = nCells, nEdges = nEdges, minDihedralDeg = minDeg,
-            maxDihedralDeg = maxDeg, nBelow10 = nLow, maxRatio = maxRatio,
+            maxDihedralDeg = maxDeg, nBelowGoal = nLow, nBelowStart = nBelowStart,
+            goalDeg = rad2deg(reportRad), flipsDone = flipsDone, maxRatio = maxRatio,
             sweepsDone = sweepsDone, exactShare = exactShare, boxSize = Lq)
     return pts, cells, edges, c2e, labels, info
 end
@@ -5694,10 +6012,10 @@ function _build_tetra(logBuf::IOBuffer, cfg::Dict)
     pts, cells, edges, c2e, ptMk, info = _triangulate_domain3(logBuf,
         L, per, obsKind, obsCx, obsCy, obsCz, obsHx, obsHy, obsHz,
         opts.meshSize, hObs, opts.grading, opts.radiusEdgeBound,
-        opts.smoothingSweeps, opts.maxVertices)
+        opts.smoothingSweeps, opts.maxVertices, opts.minDihedral)
     _log(logBuf, "  tetra: $(info.nVertices) vertices, $(info.nCells) cells")
     _log(logBuf, "  dihedral angles: smallest $(round(info.minDihedralDeg, digits = 2)), largest $(round(info.maxDihedralDeg, digits = 2)) degrees")
-    _log(logBuf, "  cells with a dihedral angle below 10 degrees: $(info.nBelow10)")
+    _log(logBuf, "  cells with a dihedral angle below $(info.goalDeg) degrees: $(info.nBelowStart) before the flips, $(info.nBelowGoal) at the end ($(info.flipsDone) flips)")
     _log(logBuf, "  largest radius-edge ratio after smoothing: $(round(info.maxRatio, digits = 3))")
     _log(logBuf, "  smoothing sweeps kept: $(info.sweepsDone) of $(opts.smoothingSweeps)")
     _log(logBuf, "  exact insphere calls: $(round(100 * info.exactShare, digits = 1)) percent")

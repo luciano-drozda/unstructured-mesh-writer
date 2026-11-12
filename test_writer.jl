@@ -415,11 +415,11 @@ predicate_tests3()
 
 # Build one mesh with the core function. The obstacle tuples are
 # (kind, cx, cy, cz, hx, hy, hz). Kind 1 is a sphere. Kind 2 is a box.
-function build3(L, per, obs, h, hObs, grading; sweeps = 3, bound = 2.0)
+function build3(L, per, obs, h, hObs, grading; sweeps = 3, bound = 2.0, minDihedral = 0.0)
     kinds = Int[o[1] for o in obs]
     f(i) = Float64[o[i] for o in obs]
     return WCore._triangulate_domain3(IOBuffer(), L, per, kinds, f(2), f(3), f(4), f(5), f(6), f(7),
-                                      h, hObs, grading, bound, sweeps, 2000000)
+                                      h, hObs, grading, bound, sweeps, 2000000, minDihedral)
 end
 
 # Return the faces of a cell list: a Dict from a sorted vertex triple to
@@ -587,6 +587,84 @@ for (name, L, per, obs, h, hObs, g, exact) in configs3
     meshD = build3(L, per, obs, h, hObs, g; sweeps = 0)
     check_mesh3(name * " (no smoothing)", L, per, obs, meshD; delaunay = true, hObs = hObs)
 end
+
+# ── Flip pass ────────────────────────────────────────────────────────────
+
+# Return the faces that belong to exactly one cell, as sorted vertex triples.
+function boundary_faces(cells)
+    return sort!([k for (k, v) in face_table(cells) if length(v) == 1])
+end
+
+# Return the total volume of a cell list, and whether every cell has a positive volume.
+function volume_info(pts, cells)
+    meas = zeros(size(cells, 1))
+    WCore.signed_measure_3d_kernel(cells, pts, size(cells, 1), meas)
+    return sum(meas), all(>(0), meas)
+end
+
+println("Flip pass")
+# Unit tests on two tetrahedra with a common face.
+let
+    # The segment between the two apexes crosses the common triangle, so a 2-3 flip is valid.
+    pts = [0.0 0.0 0.0; 1.0 0.0 0.0; 0.5 1.0 0.0; 0.5 0.3 0.5; 0.5 0.3 -0.5]
+    cells = [1 2 3 4; 1 3 2 5]
+    vol0, pos0 = volume_info(pts, cells)
+    check("flip unit: the two starting cells have a positive volume", pos0)
+    nbr = WCore._cell_neighbors3(cells)
+    check("flip unit: the two cells are neighbors across one face", count(!=(0), nbr[1, :]) == 1 && count(!=(0), nbr[2, :]) == 1 && 2 in nbr[1, :] && 1 in nbr[2, :])
+    out, nTried, nDone = WCore._flip_pass3(pts, cells, deg2rad(89.0), 2.0, -Inf)
+    vol1, pos1 = volume_info(pts, out)
+    check("flip unit: a valid 2-3 flip turns 2 cells into 3", nDone == 1 && size(out, 1) == 3)
+    check("flip unit: the 2-3 flip keeps the volume and the positive orientation", isapprox(vol1, vol0; rtol = 1e-12) && pos1)
+    check("flip unit: the 2-3 flip uses the same vertices", sort(unique(vec(out))) == [1, 2, 3, 4, 5])
+    check("flip unit: the new edge joins the two apexes in all 3 cells", all(4 in out[c, :] && 5 in out[c, :] for c in 1:3))
+    # The 3 cells now form a closed ring around the edge 4-5.
+    nbr3 = WCore._cell_neighbors3(out)
+    cA = 1
+    iA = findfirst(==(4), out[cA, :]); jA = findfirst(==(5), out[cA, :])
+    check("flip unit: the edge between the apexes has a closed ring of 3 cells", length(WCore._edge_ring3(out, nbr3, cA, iA, jA)) == 3)
+    other = [(i, j) for (i, j) in WCore._tet_local_edges() if (out[cA, i], out[cA, j]) != (4, 5) && (out[cA, i], out[cA, j]) != (5, 4)]
+    check("flip unit: no other edge of that cell has a ring of 3", all(isempty(WCore._edge_ring3(out, nbr3, cA, i, j)) for (i, j) in other))
+    # Flip back. The result has 2 or 3 cells, with the same volume.
+    out2, _, _ = WCore._flip_pass3(pts, out, deg2rad(89.0), 2.0, -Inf)
+    vol2, pos2 = volume_info(pts, out2)
+    check("flip unit: a second pass keeps the volume and the orientation", isapprox(vol2, vol0; rtol = 1e-12) && pos2)
+    # The segment between the apexes misses the common triangle. The flip is not valid.
+    ptsN = [0.0 0.0 0.0; 1.0 0.0 0.0; 0.0 1.0 0.0; 0.1 0.1 1.0; 2.0 2.0 -1.0]
+    cellsN = [1 2 3 4; 1 3 2 5]
+    why = zeros(Int, 4)
+    outN, nTriedN, nDoneN = WCore._flip_pass3(ptsN, cellsN, deg2rad(89.0), 2.0, -Inf, why)
+    check("flip unit: a flip that does not fill the same space is rejected", nDoneN == 0 && outN == cellsN && why[1] >= 1)
+    # No cell is below the goal. Nothing happens.
+    outZ, _, nDoneZ = WCore._flip_pass3(pts, cells, deg2rad(1.0), 2.0, 0.0)
+    check("flip unit: no flip when no cell is below the goal", nDoneZ == 0 && outZ == cells)
+end
+
+# Invariants on real meshes. The comparison uses no smoothing, so only the flips change the mesh.
+for (name, L, per, obs, h, hObs, g) in (("box", (1.0, 1.0, 1.0), (false, false, false), [], 0.2, 0.2, 0.3),
+                                        ("sphere", (1.0, 1.0, 1.0), (false, false, false), [(1, 0.5, 0.5, 0.5, 0.2, 0.2, 0.2)], 0.2, 0.1, 0.3),
+                                        ("periodic two obstacles", (2.0, 1.0, 1.0), (false, true, true),
+                                         [(1, 0.7, 0.5, 0.5, 0.2, 0.2, 0.2), (2, 1.4, 0.5, 0.5, 0.15, 0.2, 0.15)], 0.2, 0.1, 0.3))
+    m0 = build3(L, per, obs, h, hObs, g; sweeps = 0)
+    m1 = build3(L, per, obs, h, hObs, g; sweeps = 0, minDihedral = 10.0)
+    pts0, cells0 = m0[1], m0[2]
+    pts1, cells1 = m1[1], m1[2]
+    v0, p0 = volume_info(pts0, cells0)
+    v1, p1 = volume_info(pts1, cells1)
+    check("flip $name: the vertices are unchanged", pts0 == pts1 && m0[5] == m1[5])
+    check("flip $name: the boundary faces are unchanged", boundary_faces(cells0) == boundary_faces(cells1))
+    check("flip $name: the total volume is unchanged", isapprox(v0, v1; rtol = 1e-12))
+    check("flip $name: every cell has a positive volume", p1)
+    check("flip $name: every face belongs to 1 or 2 cells", all(length(v) <= 2 for v in values(face_table(cells1))))
+    check("flip $name: the smallest dihedral angle does not shrink", m1[6].minDihedralDeg >= m0[6].minDihedralDeg - 1e-9)
+    check("flip $name: the number of cells below the goal does not grow", m1[6].nBelowGoal <= m0[6].nBelowStart + 0)
+    check("flip $name: the radius-edge ratio stays within the bound", m1[6].maxRatio <= max(m0[6].maxRatio, 2.0) + 1e-12)
+    check("flip $name: the flips reduce the number of cells below 10 degrees", m1[6].nBelowGoal < m1[6].nBelowStart || m1[6].nBelowStart == 0)
+    check_mesh3("$name with flips", L, per, obs, build3(L, per, obs, h, hObs, g; minDihedral = 10.0); hObs = hObs)
+end
+check("min_dihedral above 60 is an error", raises(() -> WCore._resolve_mesh_options3(Dict("mesh_size" => 0.1, "min_dihedral" => 61.0))))
+check("min_dihedral below 0 is an error", raises(() -> WCore._resolve_mesh_options3(Dict("mesh_size" => 0.1, "min_dihedral" => -1.0))))
+check("min_dihedral defaults to 10", WCore._resolve_mesh_options3(Dict("mesh_size" => 0.1)).minDihedral == 10.0)
 
 # ── Random configurations ────────────────────────────────────────────────
 
@@ -1349,14 +1427,13 @@ if haveIO
         storedNames = sort([splitext(f)[1] for f in readdir(storedDir) if endswith(f, ".yaml")])
         check("gallery_julia: the YAML names are the gallery case names", storedNames == sort([c[1] for c in galleryCases]))
         check("gallery_julia: every YAML has a PNG", all(n -> isfile(joinpath(storedDir, "$n.png")), storedNames))
-        okLoad = true
-        for n in storedNames
-            try
-                W.load_config(joinpath(storedDir, "$n.yaml"))
-            catch
-                okLoad = false
-            end
+        loads(n) = try
+            W.load_config(joinpath(storedDir, "$n.yaml"))
+            true
+        catch
+            false
         end
+        okLoad = all(loads, storedNames)
         check("gallery_julia: every YAML loads as a config", okLoad)
     end
 
