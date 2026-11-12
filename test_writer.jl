@@ -665,6 +665,19 @@ end
 check("min_dihedral above 60 is an error", raises(() -> WCore._resolve_mesh_options3(Dict("mesh_size" => 0.1, "min_dihedral" => 61.0))))
 check("min_dihedral below 0 is an error", raises(() -> WCore._resolve_mesh_options3(Dict("mesh_size" => 0.1, "min_dihedral" => -1.0))))
 check("min_dihedral defaults to 10", WCore._resolve_mesh_options3(Dict("mesh_size" => 0.1)).minDihedral == 10.0)
+# The warning appears only when cells stay below the goal.
+function tetra_log(goal)
+    cfg = WCore._check_config(Dict("mesh_type" => "tetra", "box_length" => [1.0, 1.0, 1.0], "periodic" => [false, false, false],
+                               "mesh_options" => Dict("mesh_size" => 0.2, "min_dihedral" => goal)))
+    buf = IOBuffer()
+    redirect_stdout(devnull) do
+        WCore._build_tetra(buf, cfg)
+    end
+    return String(take!(buf))
+end
+check("flip warning: a goal that the flips cannot reach gives a [warn] line", occursin("[warn] tetra:", tetra_log(60.0)))
+check("flip warning: a reachable goal gives no [warn] line", !occursin("[warn] tetra:", tetra_log(10.0)))
+check("flip warning: the value 0 gives no [warn] line", !occursin("[warn] tetra:", tetra_log(0.0)))
 
 # ── Random configurations ────────────────────────────────────────────────
 

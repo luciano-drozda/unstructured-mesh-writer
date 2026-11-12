@@ -6016,6 +6016,9 @@ function _build_tetra(logBuf::IOBuffer, cfg::Dict)
     _log(logBuf, "  tetra: $(info.nVertices) vertices, $(info.nCells) cells")
     _log(logBuf, "  dihedral angles: smallest $(round(info.minDihedralDeg, digits = 2)), largest $(round(info.maxDihedralDeg, digits = 2)) degrees")
     _log(logBuf, "  cells with a dihedral angle below $(info.goalDeg) degrees: $(info.nBelowStart) before the flips, $(info.nBelowGoal) at the end ($(info.flipsDone) flips)")
+    if opts.minDihedral > 0 && info.nBelowGoal > 0
+        _log(logBuf, "  [warn] tetra: $(info.nBelowGoal) cells have a dihedral angle below the goal of $(opts.minDihedral) degrees. The flips could not remove them.")
+    end
     _log(logBuf, "  largest radius-edge ratio after smoothing: $(round(info.maxRatio, digits = 3))")
     _log(logBuf, "  smoothing sweeps kept: $(info.sweepsDone) of $(opts.smoothingSweeps)")
     _log(logBuf, "  exact insphere calls: $(round(100 * info.exactShare, digits = 1)) percent")
