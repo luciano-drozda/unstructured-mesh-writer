@@ -1991,17 +1991,20 @@ if haveIO
 
     # The script tools/hierarchy_multigrid_check.jl reads the written files
     # like a solver. It checks the prolongation, the Galerkin product and a
-    # V-cycle. The test runs it on a 2-D and a 3-D hierarchy.
+    # V-cycle. The test runs it on 2-D and 3-D hierarchies, with and without
+    # periodic directions.
     let
         script = joinpath(dirname(writerPath), "tools", "hierarchy_multigrid_check.jl")
         if isfile(script) && writerPath == abspath(joinpath(@__DIR__, "writer.jl"))
             outFile = joinpath(hierDir, "mg_check.out")
-            proc = run(pipeline(ignorestatus(`$(Base.julia_cmd()) --project=$(dirname(writerPath)) $script kuhn_box gridsplit_stretched`);
+            proc = run(pipeline(ignorestatus(`$(Base.julia_cmd()) --project=$(dirname(writerPath)) $script kuhn_box gridsplit_stretched kuhn_periodic triangle_periodic kuhn_fully_periodic`);
                                 stdout = outFile, stderr = devnull))
             text = read(outFile, String)
             check("multigrid check: the script exits with code 0", proc.exitcode == 0)
             check("multigrid check: the script reports that all checks passed", occursin("All checks passed.", text))
-            check("multigrid check: the script ran both hierarchies", occursin("== kuhn_box", text) && occursin("== gridsplit_stretched", text))
+            check("multigrid check: the script ran all 5 hierarchies",
+                  all(n -> occursin("== $n:", text), ("kuhn_box", "gridsplit_stretched", "kuhn_periodic", "triangle_periodic", "kuhn_fully_periodic")))
+            check("multigrid check: the periodic hierarchies were checked for periodic images", count("periodic images", text) >= 3)
         end
     end
 

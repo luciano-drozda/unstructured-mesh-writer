@@ -6,16 +6,23 @@
 # For each hierarchy the script does these checks:
 #   1. The prolongation matrix P, built from fine_vertex_parents, copies
 #      every linear function of the coarse level to the fine level.
-#   2. The Galerkin product P' * A_fine * P equals the stiffness matrix
+#   2. On a periodic mesh, a periodic function of the coarse level is
+#      still periodic after P. The two periodic images of a fine vertex
+#      must get the same value.
+#   3. The Galerkin product P' * A_fine * P equals the stiffness matrix
 #      A_coarse, which the script assembles on the coarse mesh. This holds
 #      only when the coarse space lies inside the fine space, so it tests
 #      the nesting, the vertex order and the cell order in one number.
-#   3. A V(2,2)-cycle solves a Poisson problem with zero values on the
-#      boundary. The script prints the convergence factor for 2, 3, ...
-#      levels. A factor of 0.7 or more counts as a failure. A broken
-#      hierarchy gives a factor near 1.
-# The problem has a zero value at every vertex with a boundary marker. The
-# script uses meshes without periodic directions. The smoother is a plain
+#   4. A fine vertex on the boundary has no free coarse vertex as parent.
+#      Without this, the zero values on the boundary would not nest.
+#   5. A V(2,2)-cycle solves a Poisson problem. The script prints the
+#      convergence factor for 2, 3, ... levels. A factor of 0.7 or more
+#      counts as a failure. A broken hierarchy gives a factor near 1.
+# The problem has a zero value at every vertex on an obstacle and on a box
+# side without periodicity. The vertices that are periodic images of each
+# other are one unknown. A mesh that is periodic in every direction and has
+# no obstacle has no zero value. The script then solves -Laplace(u) + u = 1
+# with a lumped mass matrix, because the pure Laplace matrix is singular. The smoother is a plain
 # Gauss-Seidel sweep, so the factor depends on the mesh quality. It can
 # grow a little with the number of levels on unstructured 3-D meshes.
 # Usage: julia --project=. tools/hierarchy_multigrid_check.jl [NAME ...]
@@ -227,21 +234,93 @@ function vcycle!(lev, k, b, x, nu)
     return nothing
 end
 
-# Run the three checks on one hierarchy. The argument yamlPath is the config
+# Group the vertices of one level into classes. Two vertices are in the same
+# class when they are periodic images of each other. A vertex without a
+# partner is a class of its own. The classes are numbered in the order of
+# their lowest vertex, so vertex 1 is always in class 1. Return the class
+# of each vertex and the number of classes.
+function vertex_classes(m)
+    n = size(m.pts, 1)
+    root = collect(1:n)
+    function find(x)
+        while root[x] != x
+            root[x] = root[root[x]]
+            x = root[x]
+        end
+        return x
+    end
+    for r in 1:size(m.allPairs, 1)
+        ra = find(m.allPairs[r, 1])
+        rb = find(m.allPairs[r, 2])
+        ra != rb && (root[max(ra, rb)] = min(ra, rb))
+    end
+    cls = zeros(Int, n)
+    nCls = 0
+    for v in 1:n
+        if find(v) == v
+            nCls += 1
+            cls[v] = nCls
+        else
+            cls[v] = cls[find(v)]
+        end
+    end
+    return cls, nCls
+end
+
+# Find the classes with a zero value (Dirichlet). A class has one when a
+# vertex lies on an obstacle (marker 10 or more) or on a box side with no
+# periodicity. Return a vector of Bool, one entry for each class. All
+# entries are false when the mesh is periodic in every direction and has
+# no obstacle.
+function dirichlet_classes(m, cls, nCls)
+    isD = fill(false, nCls)
+    tol = 1e-9 * maximum(m.boxLength)
+    for v in 1:size(m.pts, 1)
+        hit = m.ptMk[v] >= 10
+        for d in 1:m.dim
+            m.periodic[d] && continue
+            hit = hit || abs(m.pts[v, d]) < tol || abs(m.pts[v, d] - m.boxLength[d]) < tol
+        end
+        hit && (isD[cls[v]] = true)
+    end
+    return isD
+end
+
+# Run the checks on one hierarchy. The argument yamlPath is the config
 # of a hierarchy that writer.jl has already written. Return a vector of
-# failed check names.
+# failed check names. A periodic direction is allowed. Vertices that are
+# periodic images of each other are one unknown.
 function check_hierarchy(name, yamlPath)
     levels = load_hierarchy(yamlPath)
     nL = length(levels)
     failed = String[]
-    println("== $name: $(nL) levels, $(levels[1].dim)-D, cells ", join([size(l.cells, 1) for l in levels], " / "))
+    per = levels[1].periodic
+    println("== $name: $(nL) levels, $(levels[1].dim)-D, periodic $(join(Int.(collect(per)), "")), cells ", join([size(l.cells, 1) for l in levels], " / "))
+    cls = Vector{Int}[]
+    nCls = Int[]
+    isD = Vector{Bool}[]
+    R = SparseMatrixCSC{Float64,Int}[]
     for l in levels
-        any(l.periodic) && error("$name has a periodic direction. This script needs a mesh without periodic directions.")
+        c, n = vertex_classes(l)
+        push!(cls, c)
+        push!(nCls, n)
+        push!(isD, dirichlet_classes(l, c, n))
+        # R maps the value of each class to the value of each vertex.
+        push!(R, sparse(1:length(c), c, 1.0, length(c), n))
     end
-    free = [findall(l.ptMk .== 0) for l in levels]
+    # Sel maps the values at the vertices to the values of the classes. It takes the lowest vertex of each class.
+    rep = [zeros(Int, nCls[k]) for k in 1:nL]
+    for k in 1:nL, v in 1:length(cls[k])
+        rep[k][cls[k][v]] == 0 && (rep[k][cls[k][v]] = v)
+    end
+    Sel = [sparse(1:nCls[k], rep[k], 1.0, nCls[k], size(levels[k].pts, 1)) for k in 1:nL]
+    println("   classes of vertices: ", join(["$(nCls[k]) of $(size(levels[k].pts, 1))" for k in 1:nL], " / "))
+    free = [findall(.!isD[k]) for k in 1:nL]
     Afull = [assemble(l)[1] for l in levels]
     bfull = [assemble(l)[2] for l in levels]
     Pfull = [k == 1 ? nothing : prolongation(levels[k], size(levels[k - 1].pts, 1)) for k in 1:nL]
+    # Pc maps the values of the classes of level k-1 to the values of the classes of level k.
+    Pc = [k == 1 ? nothing : Sel[k] * Pfull[k] * R[k - 1] for k in 1:nL]
 
     # Check 1: linear functions go from the coarse to the fine level unchanged.
     rng = MersenneTwister(7)
@@ -255,27 +334,54 @@ function check_hierarchy(name, yamlPath)
         (err < 1e-12 && rowsum < 1e-14) || push!(failed, "$name: prolongation is not exact for linear functions at level $(k - 1)")
     end
 
-    # Check 2: the Galerkin product equals the stiffness matrix of the coarse mesh.
+    # Check 2: a periodic function of the coarse level stays periodic on the fine level.
+    # This needs two periodic images on the fine level to have parents that are periodic images too.
+    if any(per)
+        for k in 2:nL
+            uc = R[k - 1] * randn(rng, nCls[k - 1])
+            uf = Pfull[k] * uc
+            err = maximum(abs.(R[k] * (Sel[k] * uf) - uf))
+            println("   periodic images   level $(k - 2) -> $(k - 1): largest jump between images $(round(err, sigdigits = 3))")
+            err < 1e-13 || push!(failed, "$name: a periodic function is not periodic after the prolongation at level $(k - 1)")
+        end
+    end
+
+    # Check 3: the Galerkin product equals the stiffness matrix of the coarse mesh.
+    # The matrices are those of the unknowns of the classes.
     for k in 2:nL
-        G = Pfull[k]' * Afull[k] * Pfull[k]
-        err = norm(G - Afull[k - 1], Inf) / norm(Afull[k - 1], Inf)
+        Af = R[k]' * Afull[k] * R[k]
+        Ac = R[k - 1]' * Afull[k - 1] * R[k - 1]
+        G = Pc[k]' * Af * Pc[k]
+        err = norm(G - Ac, Inf) / norm(Ac, Inf)
         println("   Galerkin product  level $(k - 1) -> $(k - 2): relative difference $(round(err, sigdigits = 3))")
         err < 1e-12 || push!(failed, "$name: Galerkin product differs from the coarse matrix at level $(k - 2)")
     end
 
-    # Check 3: V-cycles. Level 0 stays the coarsest level. The finest level changes.
+    # Check 4: a fine vertex on the boundary has no coarse parent that is free.
+    # Without this, the zero values on the boundary would not nest.
+    for k in 2:nL
+        blk = Pc[k][isD[k], free[k - 1]]
+        err = isempty(blk) ? 0.0 : maximum(abs.(blk))
+        println("   boundary parents  level $(k - 2) -> $(k - 1): largest weight of a free coarse vertex on a fine boundary vertex $(round(err, sigdigits = 3))")
+        err < 1e-14 || push!(failed, "$name: a fine boundary vertex has a free coarse parent at level $(k - 1)")
+    end
+
+    # Check 5: V-cycles. Level 0 stays the coarsest level. The finest level changes.
     for top in 2:nL
         lev = NamedTuple[]
         for k in 1:top
             I = free[k]
-            A = Afull[k][I, I]
-            P = k == 1 ? nothing : Pfull[k][free[k], free[k - 1]]
+            A = R[k]' * Afull[k] * R[k]
+            # a mesh with no zero value: add the lumped mass matrix, so the matrix is not singular
+            any(isD[k]) || (A = A + R[k]' * spdiagm(0 => bfull[k]) * R[k])
+            A = A[I, I]
+            P = k == 1 ? nothing : Pc[k][free[k], free[k - 1]]
             push!(lev, (A = A, P = P, fact = k == 1 ? cholesky(Symmetric(A)) : nothing))
         end
         A = lev[top].A
-        b = bfull[top][free[top]]
+        b = (R[top]' * bfull[top])[free[top]]
         exact = cholesky(Symmetric(A)) \ b
-        # V(2,2) cycle: 2 forward sweeps, correction, 2 backward sweeps
+        # V(2,2)-cycle: 2 forward sweeps, correction, 2 backward sweeps
         x = zeros(Float64, length(b))
         res = [norm(b - A * x)]
         for _ in 1:12
@@ -322,6 +428,68 @@ n_divisions: [2, 2, 2]
 diagonal: main
 hierarchy:
   levels: 4
+"""),
+    ("triangle_periodic", """
+mesh_type: triangle
+box_length: [3.0, 1.0]
+periodic: [true, true]
+obstacles:
+  - shape: circle
+    center: [1.0, 0.5]
+    radius: 0.2
+  - shape: rectangle
+    center: [2.0, 0.5]
+    half_extents: [0.25, 0.15]
+mesh_options:
+  mesh_size: 0.4
+  mesh_size_obstacle: 0.2
+hierarchy:
+  levels: 4
+"""),
+    ("gridsplit_periodic_x", """
+mesh_type: gridsplit
+box_length: [1.0, 1.0]
+n_divisions: [4, 3]
+diagonal: slash
+periodic: [true, false]
+hierarchy:
+  levels: 5
+"""),
+    ("kuhn_periodic", """
+mesh_type: kuhn
+box_length: [1.0, 1.0, 1.0]
+n_divisions: [2, 2, 2]
+periodic: [true, false, true]
+diagonal: main
+hierarchy:
+  levels: 4
+"""),
+    ("kuhn_fully_periodic", """
+mesh_type: kuhn
+box_length: [1.0, 1.0, 1.0]
+n_divisions: [2, 2, 2]
+periodic: [true, true, true]
+diagonal: main
+hierarchy:
+  levels: 4
+"""),
+    ("tetra_periodic", """
+mesh_type: tetra
+box_length: [2.0, 1.0, 1.0]
+periodic: [false, true, true]
+obstacles:
+  - shape: sphere
+    center: [0.5, 0.5, 0.5]
+    radius: 0.2
+  - shape: box
+    center: [1.4, 0.5, 0.5]
+    half_extents: [0.15, 0.2, 0.15]
+mesh_options:
+  mesh_size: 0.5
+  mesh_size_obstacle: 0.3
+  max_dihedral: 150
+hierarchy:
+  levels: 3
 """),
     ("tetra_sphere", """
 mesh_type: tetra
