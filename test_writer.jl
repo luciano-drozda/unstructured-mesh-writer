@@ -1373,6 +1373,80 @@ let
     check("gridsplit step: the height error names the y axis", msg !== nothing && occursin("step height 0.9 is not on a grid line along y", msg))
 end
 
+# ── Step: kuhn ───────────────────────────────────────────────────────────
+
+println("Step: kuhn")
+let
+    pts = [0.0 1.0 0.5; 0.5 1.0 0.5; 1.0 1.0 0.5; 1.0 0.5 0.5; 1.0 0.0 0.5; 2.0 1.0 0.5;
+           0.5 1.0 0.0; 1.0 0.5 1.0; 0.0 2.0 0.5; 1.5 1.5 0.5; 2.0 2.0 1.0]
+    mk = zeros(Int32, size(pts, 1))
+    WCore.point_markers_3d_step_kernel(pts, size(pts, 1), 2.0, 2.0, 1.0, 1e-9, 1.0, 1.0, mk)
+    # (0,1,.5) xmin wins over the floor. (1,1,.5) is the reentrant corner and has the floor marker.
+    # (1,0,.5) is on ymin. (2,1,.5) is on xmax. (0.5,1,0) is on zmin. (1,.5,1) is on zmax.
+    check("step markers 3-D: the point rule", Int.(mk) == [1, 7, 7, 8, 3, 2, 5, 6, 1, 0, 2])
+    mk0 = zeros(Int32, size(pts, 1))
+    WCore.point_markers_3d_step_kernel(pts, size(pts, 1), 2.0, 2.0, 1.0, 1e-9, 0.0, 0.0, mk0)
+    check("step markers 3-D: a length of 0 switches the step off", mk0[2] == 0 && mk0[4] == 0 && mk0[1] == 1)
+end
+let
+    function boundary_face_list(cells)
+        tab = Dict{NTuple{3,Int},Int}()
+        for c in 1:size(cells, 1)
+            for (a, b, d) in ((1, 2, 3), (1, 2, 4), (1, 3, 4), (2, 3, 4))
+                key = Tuple(sort([cells[c, a], cells[c, b], cells[c, d]]))
+                tab[key] = get(tab, key, 0) + 1
+            end
+        end
+        return [k for (k, n) in tab if n == 1]
+    end
+    for diag in ("main", "flip_x", "flip_y", "flip_z", "alternate_layers"), (nx, ny, nz, ix, jy) in ((8, 4, 2, 2, 2), (5, 3, 2, 1, 2), (4, 4, 3, 3, 1))
+        Lx, Ly, Lz = 4.0, 2.0, 1.0
+        cfg = WCore._check_config(Dict("mesh_type" => "kuhn", "box_length" => [Lx, Ly, Lz], "n_divisions" => [nx, ny, nz],
+                                       "diagonal" => diag, "step" => Dict("length" => ix * Lx / nx, "height" => jy * Ly / ny)))
+        m = WCore._build_kuhn(IOBuffer(), cfg)
+        tag = "kuhn step $diag $nx x $ny x $nz, step at $ix x $jy"
+        nCells = size(m.cells, 1)
+        meas = zeros(Float64, nCells)
+        WCore.signed_measure_3d_kernel(m.cells, m.pts, nCells, meas)
+        check("$tag: the vertex count", size(m.pts, 1) == (nx + 1) * (ny + 1) * (nz + 1) - ix * jy * (nz + 1))
+        check("$tag: the cell count", nCells == 6 * nz * (nx * ny - ix * jy))
+        check("$tag: every cell has a positive volume", all(>(0), meas))
+        check("$tag: the volume is the box volume minus the step", abs(sum(meas) - (Lx * Ly * Lz - ix * Lx / nx * jy * Ly / ny * Lz)) < 1e-12)
+        check("$tag: the result carries the step", abs(m.step.length - ix * Lx / nx) < 1e-12 && abs(m.step.height - jy * Ly / ny) < 1e-12)
+        check("$tag: every vertex belongs to a cell", length(unique(vec(m.cells))) == size(m.pts, 1))
+        # The boundary faces of each marker.
+        faces = boundary_face_list(m.cells)
+        cnt = Dict(k => 0 for k in 0:8)
+        box = (Lx, Ly, Lz)
+        for (a, b, d) in faces
+            cnt[Int(WCore._boundary_face_marker3(m.pts, m.ptMk, box, a, b, d, m.step))] += 1
+        end
+        want = Dict(1 => 2 * (ny - jy) * nz, 2 => 2 * ny * nz, 3 => 2 * (nx - ix) * nz, 4 => 2 * nx * nz,
+                    5 => 2 * (nx * ny - ix * jy), 6 => 2 * (nx * ny - ix * jy), 7 => 2 * ix * nz, 8 => 2 * jy * nz, 0 => 0)
+        check("$tag: the boundary faces of each marker", cnt == want)
+        function mk_at(x, y, z)
+            r = findfirst(v -> abs(m.pts[v, 1] - x) < 1e-12 && abs(m.pts[v, 2] - y) < 1e-12 && abs(m.pts[v, 3] - z) < 1e-12, 1:size(m.pts, 1))
+            return Int(m.ptMk[r])
+        end
+        xs, h = ix * Lx / nx, jy * Ly / ny
+        zm = Lz / nz * (nz > 1 ? 1 : 0)
+        if nz > 1
+            check("$tag: the reentrant corner at mid height has the floor marker 7", mk_at(xs, h, zm) == 7)
+            check("$tag: the inlet corner at the step height has the marker 1", mk_at(0.0, h, zm) == 1)
+            check("$tag: the foot of the step face has the ymin marker 3", mk_at(xs, 0.0, zm) == 3)
+        end
+        check("$tag: the reentrant corner on the zmin side has the marker 5", mk_at(xs, h, 0.0) == 5)
+    end
+    # A step needs grid lines.
+    cfgBad = WCore._check_config(Dict("mesh_type" => "kuhn", "box_length" => [4.0, 2.0, 1.0], "n_divisions" => [8, 4, 2], "step" => Dict("length" => 1.01, "height" => 1.0)))
+    msg = errmsg(() -> WCore._build_kuhn(IOBuffer(), cfgBad))
+    check("kuhn step: the error names the axis and the value", msg !== nothing && occursin("step length 1.01 is not on a grid line along x", msg))
+    # The z direction can be periodic. The x and y directions cannot.
+    cfgP = Dict("mesh_type" => "kuhn", "box_length" => [4.0, 2.0, 1.0], "n_divisions" => [8, 4, 2], "periodic" => [false, false, true],
+                "step" => Dict("length" => 1.0, "height" => 1.0))
+    check("kuhn step: periodic along z is valid", WCore._check_config(cfgP)["step"] == (length = 1.0, height = 1.0))
+end
+
 # ── Names ────────────────────────────────────────────────────────────────
 
 println("Duplicate names")
@@ -1917,6 +1991,13 @@ if haveIO
                                 fm = 2d; break
                             end
                         end
+                        if fm == 0 && m.step !== nothing
+                            if all(abs(m.pts[q, 2] - m.step.height) < 1e-9 && m.pts[q, 1] <= m.step.length + 1e-9 for q in key)
+                                fm = 7
+                            elseif all(abs(m.pts[q, 1] - m.step.length) < 1e-9 && m.pts[q, 2] <= m.step.height + 1e-9 for q in key)
+                                fm = 8
+                            end
+                        end
                     end
                     for q in key
                         expected[q] = expected[q] == 0 ? fm : min(expected[q], fm)
@@ -2014,6 +2095,7 @@ if haveIO
         ("h_kuhn_alt_str", "mesh_type: kuhn\nbox_length: [1.0, 1.0, 1.0]\nn_divisions: [2, 3, 2]\ndiagonal: alternate_layers\nstretching_ratio: [1.3, 1.0, 1.5]\nstretching_symmetric: [false, false, true]\nhierarchy:\n  levels: 3\n"),
         ("h_tetra_plain", "mesh_type: tetra\nbox_length: [1.0, 1.0, 1.0]\nmesh_options:\n  mesh_size: 0.5\nhierarchy:\n  levels: 3\n"),
         ("h_tetra_obs", "mesh_type: tetra\nbox_length: [2.0, 1.0, 1.0]\nperiodic: [false, true, true]\nmesh_options:\n  mesh_size: 0.5\n  mesh_size_obstacle: 0.3\nobstacles:\n  - shape: sphere\n    center: [0.7, 0.5, 0.5]\n    radius: 0.2\n  - shape: box\n    center: [1.4, 0.5, 0.5]\n    half_extents: [0.15, 0.2, 0.15]\nhierarchy:\n  levels: 3\n"),
+        ("h_kuhn_step", "mesh_type: kuhn\nbox_length: [4.0, 2.0, 1.0]\nn_divisions: [8, 4, 2]\ndiagonal: alternate_layers\nperiodic: [false, false, true]\nstep:\n  length: 1.0\n  height: 1.0\nhierarchy:\n  levels: 3\n"),
     ]
     for (name, yamlText) in hierCases3
         write(joinpath(hierDir, "$name.yaml"), yamlText)
@@ -2167,13 +2249,13 @@ if haveIO
         script = joinpath(dirname(writerPath), "tools", "hierarchy_multigrid_check.jl")
         if isfile(script) && writerPath == abspath(joinpath(@__DIR__, "writer.jl"))
             outFile = joinpath(hierDir, "mg_check.out")
-            proc = run(pipeline(ignorestatus(`$(Base.julia_cmd()) --project=$(dirname(writerPath)) $script kuhn_box gridsplit_stretched gridsplit_step kuhn_periodic triangle_periodic kuhn_fully_periodic`);
+            proc = run(pipeline(ignorestatus(`$(Base.julia_cmd()) --project=$(dirname(writerPath)) $script kuhn_box gridsplit_stretched gridsplit_step kuhn_step kuhn_periodic triangle_periodic kuhn_fully_periodic`);
                                 stdout = outFile, stderr = devnull))
             text = read(outFile, String)
             check("multigrid check: the script exits with code 0", proc.exitcode == 0)
             check("multigrid check: the script reports that all checks passed", occursin("All checks passed.", text))
-            check("multigrid check: the script ran all 6 hierarchies",
-                  all(n -> occursin("== $n:", text), ("kuhn_box", "gridsplit_stretched", "gridsplit_step", "kuhn_periodic", "triangle_periodic", "kuhn_fully_periodic")))
+            check("multigrid check: the script ran all 7 hierarchies",
+                  all(n -> occursin("== $n:", text), ("kuhn_box", "gridsplit_stretched", "gridsplit_step", "kuhn_step", "kuhn_periodic", "triangle_periodic", "kuhn_fully_periodic")))
             check("multigrid check: the periodic hierarchies were checked for periodic images", count("periodic images", text) >= 3)
         end
     end

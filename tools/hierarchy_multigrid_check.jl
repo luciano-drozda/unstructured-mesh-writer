@@ -278,6 +278,12 @@ function dirichlet_classes(m, cls, nCls)
     tol = 1e-9 * maximum(m.boxLength)
     for v in 1:size(m.pts, 1)
         hit = m.ptMk[v] > 2 * m.dim
+        # A vertex on a periodic side keeps the marker of that side. So
+        # the step is also found from the coordinates.
+        if m.step !== nothing
+            hit = hit || (abs(m.pts[v, 2] - m.step.height) < tol && m.pts[v, 1] < m.step.length + tol)
+            hit = hit || (abs(m.pts[v, 1] - m.step.length) < tol && m.pts[v, 2] < m.step.height + tol)
+        end
         for d in 1:m.dim
             m.periodic[d] && continue
             hit = hit || abs(m.pts[v, d]) < tol || abs(m.pts[v, d] - m.boxLength[d]) < tol
@@ -424,6 +430,18 @@ step:
   height: 1.0
 hierarchy:
   levels: 4
+"""),
+    ("kuhn_step", """
+mesh_type: kuhn
+box_length: [4.0, 2.0, 1.0]
+n_divisions: [8, 4, 2]
+diagonal: alternate_layers
+periodic: [false, false, true]
+step:
+  length: 1.0
+  height: 1.0
+hierarchy:
+  levels: 3
 """),
     ("gridsplit_stretched", """
 mesh_type: gridsplit

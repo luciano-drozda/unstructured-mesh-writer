@@ -707,6 +707,63 @@ function point_markers_grid_3d_kernel(nx, ny, nz, ptMk)
     return nothing
 end
 
+# point_markers_3d_step_kernel(pts, n, Lx, Ly, Lz, tol, stepL, stepH, ptMk)
+#
+# Set the marker of each vertex from its coordinates. The markers are
+# 1 xmin, 2 xmax, 3 ymin, 4 ymax, 5 zmin, 6 zmax, 7 step floor and
+# 8 step face. An interior vertex gets 0. Each write replaces the
+# earlier one, and the writes go from the highest marker to the lowest.
+# The lowest marker wins at a shared vertex. A box side wins over the
+# step. The step block spans the full width along z.
+#
+# pts: vertex array with x, y, z in the columns 1 to 3
+# n: number of vertices
+# Lx: box length along x
+# Ly: box length along y
+# Lz: box length along z
+# tol: distance below which a vertex lies on a boundary
+# stepL: length of the step block along x, or 0 for a domain without step
+# stepH: height of the step block along y
+# ptMk: length-n output array
+function point_markers_3d_step_kernel(pts, n, Lx, Ly, Lz, tol, stepL, stepH, ptMk)
+    for v = 1:n
+        x = pts[v, 1]
+        y = pts[v, 2]
+        z = pts[v, 3]
+        mk = 0
+        # The step first. The face (8) goes before the floor (7).
+        if stepL > 0.0
+            if abs(x - stepL) < tol && y < stepH + tol
+                mk = 8
+            end
+            if abs(y - stepH) < tol && x < stepL + tol
+                mk = 7
+            end
+        end
+        # Box sides last. Marker 1 is the last write, so it wins.
+        if abs(z - Lz) < tol
+            mk = 6
+        end
+        if abs(z) < tol
+            mk = 5
+        end
+        if abs(y - Ly) < tol
+            mk = 4
+        end
+        if abs(y) < tol
+            mk = 3
+        end
+        if abs(x - Lx) < tol
+            mk = 2
+        end
+        if abs(x) < tol
+            mk = 1
+        end
+        ptMk[v] = mk
+    end
+    return nothing
+end
+
 # ── Shared geometry kernels ───────────────────────────────────────────
 
 # signed_measure_2d_kernel(cells, pts, n, meas)
@@ -6333,11 +6390,44 @@ function _build_kuhn(logBuf::IOBuffer, cfg::Dict)
     signed_measure_3d_kernel(cells0, pts, nCells, meas)
     _check_cell_orientation(logBuf, meas, "kuhn")
 
+    if cfg["step"] !== nothing
+        return _kuhn_step(pts, cells0, px, py, cfg)
+    end
+
     ptMk = zeros(Int32, nPts)
     point_markers_grid_3d_kernel(nx, ny, nz, ptMk)
 
     return _builder_result(pts, cells0, ptMk, nothing, nothing, nothing, NamedTuple[],
                            cfg["box_length"], nothing, :none, ())
+end
+
+# Cut the step block out of a full kuhn mesh. The step corner must lie on
+# a grid line. The block spans all layers along z. The markers come from
+# the coordinates.
+function _kuhn_step(pts::Matrix{Float64}, cells0::Matrix{Int}, px::Vector{Float64}, py::Vector{Float64}, cfg::Dict)
+    Lx, Ly, Lz = cfg["box_length"]
+    nx = length(px) - 1
+    ny = length(py) - 1
+    tol = 1.0e-9 * max(Lx, Ly, Lz)
+    ix = _step_index(px, cfg["step"].length, tol, "length", "x")
+    jy = _step_index(py, cfg["step"].height, tol, "height", "y")
+    # Cube q (0-based) has the 6 rows 6q+1 to 6q+6. Its column is
+    # mod(q, nx) and its row is mod(div(q, nx), ny).
+    nCells0 = size(cells0, 1)
+    keep = ones(Int, nCells0)
+    for c in 1:nCells0
+        q = div(c - 1, 6)
+        (mod(q, nx) < ix && mod(div(q, nx), ny) < jy) && (keep[c] = 0)
+    end
+    pts2, cells = _compact_by_cells(pts, cells0, keep)
+    nPts = size(pts2, 1)
+    stepL = px[ix + 1]
+    stepH = py[jy + 1]
+    ptMk = zeros(Int32, nPts)
+    point_markers_3d_step_kernel(pts2, nPts, Lx, Ly, Lz, tol, stepL, stepH, ptMk)
+
+    return _builder_result(pts2, cells, ptMk, nothing, nothing, nothing, NamedTuple[],
+                           cfg["box_length"], nothing, :none, (), (length = stepL, height = stepH))
 end
 
 # Build one triangle mesh of a box with obstacles from a config.
@@ -6719,7 +6809,7 @@ end
 
 # Return the mesh types that accept the key step.
 function _step_types()
-    return ("gridsplit",)
+    return ("gridsplit", "kuhn")
 end
 
 # Check the config value of the key step. Return nothing when the key is
