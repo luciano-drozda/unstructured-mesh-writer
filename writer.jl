@@ -33,6 +33,8 @@ Keys in the YAML file:
     stretching_symmetric  gridsplit and kuhn.   Error.
     obstacles           Error if not empty.     Optional.
     mesh_options        Error.                  Required.
+    step                Optional. Not for       Optional.
+                        equilateral.
     hierarchy           Optional.               Optional.
     gmsh_options        Error.                  Error.
 
@@ -49,6 +51,17 @@ An obstacle record has the keys shape, center, and one more key.
               half_extents (3 entries).
 An obstacle that crosses or touches the box is an error. Two obstacles
 with overlapping bounding boxes are an error.
+
+The key step makes a backward-facing step. It has the keys length (xs)
+and height (h). The step is the block [0, xs] x [0, h] of the box. In 3-D
+the block spans the full width. The flow goes along +x. The inlet is the
+side x = 0 above the step. A step needs periodic false along x and y. The
+z direction can be periodic. The grid types need xs and h on grid lines.
+The step adds two boundary markers, which continue the box sides. The
+step floor (y = h, x <= xs) has the marker 5 in 2-D and 7 in 3-D. The
+step face (x = xs, y <= h) has the marker 6 in 2-D and 8 in 3-D. The
+lowest marker wins at a shared vertex. The file gets a group domain with
+the attributes kind, step_length and step_height.
 
 Keys in mesh_options:
     mesh_size           Target edge length far from obstacles. Required.
@@ -6066,11 +6079,13 @@ end
 #                   edge markers of a 2-D grid mesh once the edge array
 #                   exists), or :none (3-D, no edge markers)
 #   edgeMarkerArgs  extra arguments of the rule, a Tuple
+#   step            NamedTuple (length, height) for a domain with a
+#                   backward-facing step, or nothing
 function _builder_result(pts, cells, ptMk, edgeMk, edges, c2e, obstacles, boxSize, info,
-                         edgeMarkerRule::Symbol, edgeMarkerArgs::Tuple)
+                         edgeMarkerRule::Symbol, edgeMarkerArgs::Tuple, step = nothing)
     return (pts = pts, cells = cells, ptMk = ptMk, edgeMk = edgeMk, edges = edges, c2e = c2e,
             obstacles = obstacles, boxSize = boxSize, info = info,
-            edgeMarkerRule = edgeMarkerRule, edgeMarkerArgs = edgeMarkerArgs)
+            edgeMarkerRule = edgeMarkerRule, edgeMarkerArgs = edgeMarkerArgs, step = step)
 end
 
 function _build_gridsplit(logBuf::IOBuffer, cfg::Dict)
@@ -6427,7 +6442,7 @@ end
 # marker of the obstacle. A face on a box side has the number of the
 # side, and the lowest number wins. The function returns 0 when no rule
 # applies.
-function _boundary_face_marker3(pts::Matrix{Float64}, ptMk::Vector{Int32}, box, a::Int, b::Int, c::Int)
+function _boundary_face_marker3(pts::Matrix{Float64}, ptMk::Vector{Int32}, box, a::Int, b::Int, c::Int, step = nothing)
     ma = Int(ptMk[a])
     if ma >= 100 && ma == ptMk[b] && ma == ptMk[c]
         return ma
@@ -6440,6 +6455,19 @@ function _boundary_face_marker3(pts::Matrix{Float64}, ptMk::Vector{Int32}, box, 
         if abs(pts[a, d] - box[d]) < tol && abs(pts[b, d] - box[d]) < tol && abs(pts[c, d] - box[d]) < tol
             return 2 * d
         end
+    end
+    # A face on the step floor or on the step face. The box sides above
+    # have priority.
+    if step !== nothing
+        floorMk, faceMk = _step_markers(3)
+        onFloor = true
+        onFace = true
+        for v in (a, b, c)
+            onFloor = onFloor && abs(pts[v, 2] - step.height) < tol && pts[v, 1] <= step.length + tol
+            onFace = onFace && abs(pts[v, 1] - step.length) < tol && pts[v, 2] <= step.height + tol
+        end
+        onFloor && return floorMk
+        onFace && return faceMk
     end
     return 0
 end
@@ -6501,7 +6529,7 @@ function _refine_mesh3(res, fixedDiagonal::Int = 0)
     for c in 1:nC, f in 1:4
         nbr[c, f] == 0 || continue
         fv = _face3(f)
-        mk = _boundary_face_marker3(pts, ptMk, res.boxSize, cells[c, fv[1]], cells[c, fv[2]], cells[c, fv[3]])
+        mk = _boundary_face_marker3(pts, ptMk, res.boxSize, cells[c, fv[1]], cells[c, fv[2]], cells[c, fv[3]], res.step)
         if mk == 0
             nNoMarker += 1
             continue
@@ -6526,7 +6554,7 @@ end
 # circle or a sphere gives less than 1, because the mesh holds a polygon
 # or a polyhedron inside the shape. The record fields follow
 # _obstacle_record2 and _obstacle_record3.
-function _obstacle_capture(obstacles, box::Tuple, dim::Int, totalVolume::Float64)
+function _obstacle_capture(obstacles, box::Tuple, dim::Int, totalVolume::Float64, step = nothing)
     exact = 0.0
     for obs in obstacles
         if obs.shape == "circle"
@@ -6538,7 +6566,44 @@ function _obstacle_capture(obstacles, box::Tuple, dim::Int, totalVolume::Float64
         end
     end
     boxVolume = prod(box[1:dim])
+    # The step removes a block from the box. The block spans the full width.
+    step === nothing || (boxVolume -= step.length * step.height * (dim == 3 ? box[3] : 1.0))
     return exact, (boxVolume - totalVolume) / exact
+end
+
+# Return the markers of the step floor and of the step face for a mesh of
+# dimension dim. They continue the numbering of the box sides: 5 and 6 in
+# 2-D, 7 and 8 in 3-D.
+function _step_markers(dim::Int)
+    return (2 * dim + 1, 2 * dim + 2)
+end
+
+# Return the mesh types that accept the key step.
+function _step_types()
+    return ()
+end
+
+# Check the config value of the key step. Return nothing when the key is
+# absent. Otherwise return a NamedTuple with the fields length and height.
+# The step is the block [0, length] x [0, height] of the box. In 3-D the
+# block spans the full width.
+function _resolve_step(raw, box::Tuple)
+    raw === nothing && return nothing
+    raw isa AbstractDict || error("'step' must be a mapping with the keys length and height")
+    known = ("length", "height")
+    for k in keys(raw)
+        k in known || error("step: unknown key '$k'. Valid keys: $(join(known, ", "))")
+    end
+    for k in known
+        haskey(raw, k) || error("step: '$k' is required")
+        v = raw[k]
+        (v isa Real && !(v isa Bool)) || error("step['$k'] must be a number, got $(repr(v))")
+    end
+    xs = Float64(raw["length"])
+    h = Float64(raw["height"])
+    (xs > 0 && xs < box[1]) || error("step['length'] must be greater than 0 and less than box_length[1] ($(box[1])), got $xs")
+    (h > 0 && h < box[2]) || error("step['height'] must be greater than 0 and less than box_length[2] ($(box[2])), got $h")
+    return (length = xs, height = h)
 end
 
 # Check the config value of the key hierarchy. Return nothing when the
@@ -6650,6 +6715,13 @@ function _check_config(cfg)
     else
         cfg["mesh_options"] = _resolve_mesh_options3(cfg["mesh_options"])
     end
+    step = _resolve_step(get(cfg, "step", nothing), cfg["box_length"])
+    if step !== nothing
+        mt == "equilateral" && error("'step' is not valid for mesh_type='equilateral'. The rows of this mesh are offset, so a step edge cannot follow them.")
+        (cfg["periodic"][1] || cfg["periodic"][2]) && error("'step' needs periodic false along x and y. The inlet and the outlet have different heights.")
+        mt in _step_types() || error("'step' is not available for mesh_type='$mt' yet.")
+    end
+    cfg["step"] = step
     cfg["hierarchy"] = _resolve_hierarchy_options(get(cfg, "hierarchy", nothing))
     cfg["mesh_type"] = mt
     cfg["dim"] = dim
@@ -6854,6 +6926,11 @@ function load_mesh(path::AbstractString)
                                   center = Float64.(oa["center"]), extent = extent))
             end
         end
+        step = nothing
+        if haskey(f, "domain")
+            da = attrs(f["domain"])
+            step = (length = Float64(da["step_length"]), height = Float64(da["step_height"]))
+        end
         hierarchy = nothing
         if haskey(f, "hierarchy")
             h = f["hierarchy"]
@@ -6870,7 +6947,7 @@ function load_mesh(path::AbstractString)
                 cellVol = rd(f, "cell_vol"), cvn = rd(f, "cell_vertex_normal"), vertexVol = rd(f, "vertex_vol"),
                 v2cOff = v2cOff, v2cIdx = v2cIdx, ptMk = rd(f["boundary"], "point_markers"), edgeMk = edgeMk,
                 periodic = periodic, perPairs = perPairs, allPairs = allPairs, obstacles = obstacles,
-                hierarchy = hierarchy)
+                hierarchy = hierarchy, step = step)
     end
 end
 
@@ -6956,7 +7033,7 @@ end
 function write_hdf5(logBuf::IOBuffer, h5Path, meshType, pts, cells, edges, c2e, cellVol, cvn, vertexVol,
                     v2cOff, v2cIdx, ptMk, edgeMk, quality::Dict{String,Float64},
                     periodic::Tuple, perPairs::Dict, allPairs, box::Tuple, dim::Int,
-                    obstacles::Vector, hier)
+                    obstacles::Vector, hier, step = nothing)
     h5open(h5Path, "w") do f
         attrs(f)["schema_version"] = 1
         attrs(f)["mesh_type"] = _h5_mesh_type(meshType)
@@ -6994,6 +7071,13 @@ function write_hdf5(logBuf::IOBuffer, h5Path, meshType, pts, cells, edges, c2e, 
             _write_ds(p, "$(dname)_pairs", arr)
         end
         _write_ds(p, "all_pairs", allPairs)
+
+        if step !== nothing
+            dg = create_group(f, "domain")
+            attrs(dg)["kind"] = "backward_facing_step"
+            attrs(dg)["step_length"] = step.length
+            attrs(dg)["step_height"] = step.height
+        end
 
         if hier !== nothing
             h = create_group(f, "hierarchy")
@@ -7215,7 +7299,7 @@ function _write_level(logBuf::IOBuffer, yamlPath::AbstractString, stem::Abstract
         cellVol[c] = abs(cellVol[c])
     end
     if !isempty(res.obstacles)
-        exactObs, share = _obstacle_capture(res.obstacles, box, dim, sum(cellVol))
+        exactObs, share = _obstacle_capture(res.obstacles, box, dim, sum(cellVol), res.step)
         _log(logBuf, "  obstacle volume captured by the mesh: $(round(100 * share, digits = 2)) percent of $(round(exactObs, sigdigits = 6))")
         if hier !== nothing && hier.level == 0 && share < 0.95
             _log(logBuf, "  [warn] hierarchy: the coarsest mesh captures $(round(100 * share, digits = 1)) percent of the obstacle volume. " *
@@ -7257,7 +7341,7 @@ function _write_level(logBuf::IOBuffer, yamlPath::AbstractString, stem::Abstract
     xdmfPath = stem * ".xdmf"
     write_hdf5(logBuf, hdf5Path, mt, pts3d, cellsOut, edgesOut, c2e, cellVol, cvn, vertexVol,
                v2cOff, v2cIdx, ptMk, edgeMk, quality, per, perPairs, allPairs, box, dim,
-               res.obstacles, hier)
+               res.obstacles, hier, res.step)
     write_xdmf(logBuf, xdmfPath, hdf5Path, nPts, nCells, size(edges, 1), dim, mt)
 
     terminalText = String(take!(logBuf))

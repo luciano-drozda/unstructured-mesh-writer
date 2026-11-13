@@ -1216,6 +1216,76 @@ let
     check("_refine_mesh3: a rule above 3 is an error", raises(() -> WCore._refine_mesh3(resK, 4)))
 end
 
+# ── Step config ──────────────────────────────────────────────────────────
+
+println("Step config")
+let box = (4.0, 2.0)
+    rs = WCore._resolve_step
+    check("step: an absent key gives nothing", rs(nothing, box) === nothing)
+    check("step: a valid record gives length and height", rs(Dict("length" => 1, "height" => 0.5), box) == (length = 1.0, height = 0.5))
+    check("step: a text is an error", raises(() -> rs("big", box)))
+    check("step: an unknown key is an error", occursin("unknown key 'depth'", something(errmsg(() -> rs(Dict("length" => 1, "height" => 0.5, "depth" => 1), box)), "")))
+    check("step: a missing length is an error", occursin("'length' is required", something(errmsg(() -> rs(Dict("height" => 0.5), box)), "")))
+    check("step: a missing height is an error", occursin("'height' is required", something(errmsg(() -> rs(Dict("length" => 1), box)), "")))
+    check("step: a text value is an error", raises(() -> rs(Dict("length" => "1", "height" => 0.5), box)))
+    check("step: a Bool value is an error", raises(() -> rs(Dict("length" => true, "height" => 0.5), box)))
+    check("step: a length of 0 is an error", raises(() -> rs(Dict("length" => 0, "height" => 0.5), box)))
+    check("step: a length equal to the box length is an error", raises(() -> rs(Dict("length" => 4.0, "height" => 0.5), box)))
+    check("step: a height equal to the box height is an error", raises(() -> rs(Dict("length" => 1, "height" => 2.0), box)))
+    check("step: a negative height is an error", raises(() -> rs(Dict("length" => 1, "height" => -0.5), box)))
+end
+check("step markers: 5 and 6 in 2-D", WCore._step_markers(2) == (5, 6))
+check("step markers: 7 and 8 in 3-D", WCore._step_markers(3) == (7, 8))
+let stepRaw = Dict("length" => 1.0, "height" => 0.5)
+    base2(mt) = Dict("mesh_type" => mt, "box_length" => [4.0, 2.0], "n_divisions" => [8, 4], "step" => copy(stepRaw))
+    check("step config: a config without step has the value nothing", WCore._check_config(Dict("mesh_type" => "gridsplit", "box_length" => [1.0, 1.0], "n_divisions" => [2, 2]))["step"] === nothing)
+    msg = errmsg(() -> WCore._check_config(base2("equilateral")))
+    check("step config: equilateral is an error", msg !== nothing && occursin("equilateral", msg) && occursin("step", msg))
+    for (axis, per) in (("x", [true, false]), ("y", [false, true]))
+        cfg = base2("gridsplit"); cfg["periodic"] = per
+        msg = errmsg(() -> WCore._check_config(cfg))
+        check("step config: periodic along $axis is an error", msg !== nothing && occursin("periodic false along x and y", msg))
+    end
+    for mt in ("gridsplit", "kuhn", "triangle", "tetra")
+        mt in WCore._step_types() && continue
+        cfg = base2(mt)
+        if mt == "kuhn" || mt == "tetra"
+            cfg["box_length"] = [4.0, 2.0, 1.0]; cfg["n_divisions"] = [8, 4, 2]
+        end
+        if mt == "triangle" || mt == "tetra"
+            delete!(cfg, "n_divisions"); cfg["mesh_options"] = Dict("mesh_size" => 0.5)
+        end
+        msg = errmsg(() -> WCore._check_config(cfg))
+        check("step config: $mt says that the step is not available yet", msg !== nothing && occursin("not available for mesh_type='$mt'", msg))
+    end
+end
+# The capture share and the face marker know the step.
+let
+    cap = WCore._obstacle_capture
+    rect = [(shape = "rectangle", center = (5.0, 5.0), half_extents = (1.0, 2.0), marker = 10)]
+    exact, share = cap(rect, (10.0, 10.0), 2, 100.0 - 2.0 - 8.0, (length = 2.0, height = 1.0))
+    check("step capture: the step volume leaves the box volume (2-D)", abs(exact - 8) < 1e-12 && abs(share - 1) < 1e-12)
+    bx = [(shape = "box", center = (5.0, 5.0, 5.0), half_extents = (1.0, 1.0, 2.0), marker = 100)]
+    exact, share = cap(bx, (10.0, 10.0, 10.0), 3, 1000.0 - 20.0 - 16.0, (length = 2.0, height = 1.0))
+    check("step capture: the step volume leaves the box volume (3-D)", abs(exact - 16) < 1e-12 && abs(share - 1) < 1e-12)
+
+    fm = WCore._boundary_face_marker3
+    step = (length = 2.0, height = 1.0)
+    box = (10.0, 4.0, 3.0)
+    pts = [0.5 1.0 0.2; 1.5 1.0 0.3; 1.0 1.0 0.9;     # 1 to 3: on the step floor
+           2.0 0.2 0.1; 2.0 0.7 0.2; 2.0 0.4 0.8;     # 4 to 6: on the step face
+           3.0 0.0 0.1; 4.0 0.0 0.2; 3.5 0.0 0.9;     # 7 to 9: on the bottom, downstream
+           3.0 4.0 0.1; 4.0 4.0 0.2; 3.5 4.0 0.9;     # 10 to 12: on the top
+           3.0 1.0 0.1; 4.0 1.0 0.2; 3.5 1.0 0.9]     # 13 to 15: on the plane y = h, but x > xs
+    mk = zeros(Int32, 15)
+    check("step face marker: the step floor gets 7", fm(pts, mk, box, 1, 2, 3, step) == 7)
+    check("step face marker: the step face gets 8", fm(pts, mk, box, 4, 5, 6, step) == 8)
+    check("step face marker: without a step the floor gets none", fm(pts, mk, box, 1, 2, 3) == 0)
+    check("step face marker: the bottom keeps the box marker 3", fm(pts, mk, box, 7, 8, 9, step) == 3)
+    check("step face marker: the top keeps the box marker 4", fm(pts, mk, box, 10, 11, 12, step) == 4)
+    check("step face marker: a face on y = h downstream of the step gets none", fm(pts, mk, box, 13, 14, 15, step) == 0)
+end
+
 # ── Names ────────────────────────────────────────────────────────────────
 
 println("Duplicate names")
