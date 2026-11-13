@@ -1600,10 +1600,10 @@ let
     check("step lattice: the spacing stays near mesh_size", maximum(diff(X)) <= 0.3 + 1e-9 && maximum(diff(Y)) <= 0.3 + 1e-9 && maximum(diff(Z)) <= 0.3 + 1e-9)
 end
 let
-    function build_step3(L, step, obs, h, hObs; sweeps = 3, minDihedral = 0.0, maxDihedral = 0.0)
+    function build_step3(L, step, obs, h, hObs; sweeps = 3, minDihedral = 0.0, maxDihedral = 0.0, perZ = false)
         kinds = Int[o[1] for o in obs]
         f(i) = Float64[o[i] for o in obs]
-        return WCore._triangulate_domain3(IOBuffer(), L, (false, false, false), kinds, f(2), f(3), f(4), f(5), f(6), f(7),
+        return WCore._triangulate_domain3(IOBuffer(), L, (false, false, perZ), kinds, f(2), f(3), f(4), f(5), f(6), f(7),
                                           h, hObs, 0.3, 2.0, sweeps, 2000000, minDihedral, maxDihedral, step[1], step[2])
     end
     function check_step3(name, L, step, obs, mesh; delaunay = false)
@@ -1695,9 +1695,37 @@ let
     end
     check("tetra step: the builder result carries the lattice step", res.step !== nothing && abs(res.step.length - 0.8) < 1e-9 && abs(res.step.height - 0.5) < 1e-9)
     check("tetra step: the result box size is the lattice box", all(abs.(collect(res.boxSize) .- [3.0, 1.0, 0.6]) .< 1e-9))
-    check("tetra step: periodic z is refused in this version",
-          occursin("periodic false along z", something(errmsg(() -> WCore._check_config(Dict("mesh_type" => "tetra", "box_length" => [3.0, 1.0, 0.6],
-                "periodic" => [false, false, true], "step" => Dict("length" => 0.8, "height" => 0.5), "mesh_options" => Dict("mesh_size" => 0.4)))), "")))
+    check("tetra step: periodic z is valid", WCore._check_config(Dict("mesh_type" => "tetra", "box_length" => [3.0, 1.0, 0.6],
+          "periodic" => [false, false, true], "step" => Dict("length" => 0.8, "height" => 0.5), "mesh_options" => Dict("mesh_size" => 0.4)))["step"] !== nothing)
+    check("tetra step: periodic x is an error", raises(() -> WCore._check_config(Dict("mesh_type" => "tetra", "box_length" => [3.0, 1.0, 0.6],
+          "periodic" => [true, false, false], "step" => Dict("length" => 0.8, "height" => 0.5), "mesh_options" => Dict("mesh_size" => 0.4)))))
+    # Spanwise periodicity. The faces on z = 0 and z = Lz mirror each other.
+    function check_mirror(name, mesh)
+        pts, cells, edges, c2e, ptMk, info = mesh
+        Lz = info.boxSize[3]
+        table = face_table(cells)
+        lo = Set{NTuple{3,NTuple{2,Float64}}}(); hi = Set{NTuple{3,NTuple{2,Float64}}}()
+        for (key, owners) in table
+            length(owners) == 1 || continue
+            zs = [pts[v, 3] for v in key]
+            xy = Tuple(sort([(pts[v, 1], pts[v, 2]) for v in key]))
+            all(z -> abs(z) < 1e-9, zs) && push!(lo, xy)
+            all(z -> abs(z - Lz) < 1e-9, zs) && push!(hi, xy)
+        end
+        check("$name: the boundary faces on z = 0 and z = Lz mirror each other", !isempty(lo) && lo == hi)
+        vlo = Set((pts[v, 1], pts[v, 2]) for v in 1:size(pts, 1) if abs(pts[v, 3]) < 1e-9)
+        vhi = Set((pts[v, 1], pts[v, 2]) for v in 1:size(pts, 1) if abs(pts[v, 3] - Lz) < 1e-9)
+        check("$name: the vertices on z = 0 and z = Lz have the same positions in x and y", vlo == vhi)
+    end
+    meshP = build_step3(L, (0.8, 0.5), [], 0.3, 0.3; sweeps = 0, perZ = true)
+    check_step3("tetra step periodic z, no smoothing", L, (0.8, 0.5), [], meshP; delaunay = true)
+    check_mirror("tetra step periodic z", meshP)
+    meshPF = build_step3(L, (0.8, 0.5), [], 0.3, 0.12; perZ = true)
+    check_step3("tetra step periodic z, finer step walls", L, (0.8, 0.5), [], meshPF)
+    check_mirror("tetra step periodic z, finer step walls", meshPF)
+    meshPS = build_step3(L2, (0.7, 0.4), obs, 0.35, 0.15; perZ = true)
+    check_step3("tetra step periodic z with a sphere", L2, (0.7, 0.4), obs, meshPS)
+    check_mirror("tetra step periodic z with a sphere", meshPS)
 end
 # The obstacle check knows the 3-D step.
 let
@@ -2363,6 +2391,7 @@ if haveIO
         ("h_tetra_obs", "mesh_type: tetra\nbox_length: [2.0, 1.0, 1.0]\nperiodic: [false, true, true]\nmesh_options:\n  mesh_size: 0.5\n  mesh_size_obstacle: 0.3\nobstacles:\n  - shape: sphere\n    center: [0.7, 0.5, 0.5]\n    radius: 0.2\n  - shape: box\n    center: [1.4, 0.5, 0.5]\n    half_extents: [0.15, 0.2, 0.15]\nhierarchy:\n  levels: 3\n"),
         ("h_kuhn_step", "mesh_type: kuhn\nbox_length: [4.0, 2.0, 1.0]\nn_divisions: [8, 4, 2]\ndiagonal: alternate_layers\nperiodic: [false, false, true]\nstep:\n  length: 1.0\n  height: 1.0\nhierarchy:\n  levels: 3\n"),
         ("h_tetra_step", "mesh_type: tetra\nbox_length: [2.0, 1.0, 0.5]\nstep:\n  length: 0.6\n  height: 0.5\nmesh_options:\n  mesh_size: 0.5\nhierarchy:\n  levels: 3\n"),
+        ("h_tetra_step_per", "mesh_type: tetra\nbox_length: [2.0, 1.0, 0.5]\nperiodic: [false, false, true]\nstep:\n  length: 0.6\n  height: 0.5\nmesh_options:\n  mesh_size: 0.5\nhierarchy:\n  levels: 3\n"),
     ]
     for (name, yamlText) in hierCases3
         write(joinpath(hierDir, "$name.yaml"), yamlText)
@@ -2516,13 +2545,13 @@ if haveIO
         script = joinpath(dirname(writerPath), "tools", "hierarchy_multigrid_check.jl")
         if isfile(script) && writerPath == abspath(joinpath(@__DIR__, "writer.jl"))
             outFile = joinpath(hierDir, "mg_check.out")
-            proc = run(pipeline(ignorestatus(`$(Base.julia_cmd()) --project=$(dirname(writerPath)) $script kuhn_box gridsplit_stretched gridsplit_step kuhn_step triangle_step tetra_step kuhn_periodic triangle_periodic kuhn_fully_periodic`);
+            proc = run(pipeline(ignorestatus(`$(Base.julia_cmd()) --project=$(dirname(writerPath)) $script kuhn_box gridsplit_stretched gridsplit_step kuhn_step triangle_step tetra_step tetra_step_periodic kuhn_periodic triangle_periodic kuhn_fully_periodic`);
                                 stdout = outFile, stderr = devnull))
             text = read(outFile, String)
             check("multigrid check: the script exits with code 0", proc.exitcode == 0)
             check("multigrid check: the script reports that all checks passed", occursin("All checks passed.", text))
-            check("multigrid check: the script ran all 9 hierarchies",
-                  all(n -> occursin("== $n:", text), ("kuhn_box", "gridsplit_stretched", "gridsplit_step", "kuhn_step", "triangle_step", "tetra_step", "kuhn_periodic", "triangle_periodic", "kuhn_fully_periodic")))
+            check("multigrid check: the script ran all 10 hierarchies",
+                  all(n -> occursin("== $n:", text), ("kuhn_box", "gridsplit_stretched", "gridsplit_step", "kuhn_step", "triangle_step", "tetra_step", "tetra_step_periodic", "kuhn_periodic", "triangle_periodic", "kuhn_fully_periodic")))
             check("multigrid check: the periodic hierarchies were checked for periodic images", count("periodic images", text) >= 3)
         end
     end

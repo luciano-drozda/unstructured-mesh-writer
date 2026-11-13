@@ -5083,25 +5083,39 @@ function _build_sphere_plc3!(M::NamedTuple, cx::Float64, cy::Float64, cz::Float6
     return nothing
 end
 
-# Link the opposite faces and the box edges of the outer box that mirror
-# each other. The outer box facets have the numbers 1 to 6. Each
-# periodic axis links the two faces that are normal to it. Segments on
-# the box edges that map onto each other form a group.
-function _setup_periodic3!(M::NamedTuple, lo::NTuple{3,Float64}, hi::NTuple{3,Float64}, per::NTuple{3,Bool})
-    for a in 1:3
-        per[a] || continue
-        f0 = 2 * (a - 1) + 1
-        f1 = f0 + 1
-        M.facMate[f0] = f1; M.facMate[f1] = f0
-        M.facMateAxis[f0] = a; M.facMateAxis[f1] = a
-        M.facMateCoord[f0] = hi[a]; M.facMateCoord[f1] = lo[a]
+# Link the opposite faces and the box edges of the outer boundary that
+# mirror each other. A plain box has the outer facets 1 to 6. Each
+# periodic axis links the two faces that are normal to it. A box with a
+# step (withStep true) has the outer facets 1 to 10, and only the axis z
+# can be periodic. The facets 5 and 6 at z = lo link to the facets 7 and 8
+# at z = hi. Segments on the outer edges that map onto each other form a
+# group.
+function _setup_periodic3!(M::NamedTuple, lo::NTuple{3,Float64}, hi::NTuple{3,Float64}, per::NTuple{3,Bool}, withStep::Bool = false)
+    nOuter = withStep ? 10 : 6
+    if withStep
+        if per[3]
+            for (f0, f1) in ((5, 7), (6, 8))
+                M.facMate[f0] = f1; M.facMate[f1] = f0
+                M.facMateAxis[f0] = 3; M.facMateAxis[f1] = 3
+                M.facMateCoord[f0] = hi[3]; M.facMateCoord[f1] = lo[3]
+            end
+        end
+    else
+        for a in 1:3
+            per[a] || continue
+            f0 = 2 * (a - 1) + 1
+            f1 = f0 + 1
+            M.facMate[f0] = f1; M.facMate[f1] = f0
+            M.facMateAxis[f0] = a; M.facMateAxis[f1] = a
+            M.facMateCoord[f0] = hi[a]; M.facMateCoord[f1] = lo[a]
+        end
     end
     keyOf = Dict{NTuple{5,Float64},Int}()
     empty!(M.groups)
     for s in 1:M.nS[]
         ax = M.segAxis[s]
         ax == 0 && continue
-        (M.segFac[][s, 1] in 1:6 && M.segFac[][s, 2] in 1:6) || continue
+        (M.segFac[][s, 1] in 1:nOuter && M.segFac[][s, 2] in 1:nOuter) || continue
         a = M.segV[][s, 1]; b = M.segV[][s, 2]
         pa = (M.vx[a], M.vy[a], M.vz[a])
         pb = (M.vx[b], M.vy[b], M.vz[b])
@@ -6096,7 +6110,7 @@ function _triangulate_domain3(logBuf::IOBuffer, L::NTuple{3,Float64}, per::NTupl
                               stepL::Float64 = 0.0, stepH::Float64 = 0.0)
     nObs = length(obsKind)
     hasStep = stepL > 0.0
-    hasStep && any(per) && error("internal error: a step with a periodic direction is not available yet")
+    hasStep && (per[1] || per[2]) && error("internal error: a step needs a domain that is not periodic along x and y")
     hObsUsed = (nObs == 0 && !hasStep) ? hMax : hObs
     M = _new_mesher3(4096, 16384, 1024, 1024, maxVertices)
     M.obsKind[] = obsKind; M.obsCx[] = obsCx; M.obsCy[] = obsCy; M.obsCz[] = obsCz
@@ -6140,7 +6154,7 @@ function _triangulate_domain3(logBuf::IOBuffer, L::NTuple{3,Float64}, per::NTupl
             _build_box_plc3!(M, lo, dd, nn, (label, label, label, label, label, label))
         end
     end
-    hasStep || _setup_periodic3!(M, (0.0, 0.0, 0.0), Lq, per)
+    _setup_periodic3!(M, (0.0, 0.0, 0.0), Lq, per, hasStep)
 
     # ---- Insert the input vertices.
     start = c1
@@ -7171,7 +7185,6 @@ function _check_config(cfg)
         mt == "equilateral" && error("'step' is not valid for mesh_type='equilateral'. The rows of this mesh are offset, so a step edge cannot follow them.")
         (cfg["periodic"][1] || cfg["periodic"][2]) && error("'step' needs periodic false along x and y. The inlet and the outlet have different heights.")
         mt in _step_types() || error("'step' is not available for mesh_type='$mt' yet.")
-        mt == "tetra" && cfg["periodic"][3] && error("'step' with mesh_type='tetra' needs periodic false along z in this version.")
     end
     cfg["step"] = step
     cfg["hierarchy"] = _resolve_hierarchy_options(get(cfg, "hierarchy", nothing))

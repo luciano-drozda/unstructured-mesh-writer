@@ -551,6 +551,19 @@ mesh_options:
 hierarchy:
   levels: 3
 """),
+    ("tetra_step_periodic", """
+mesh_type: tetra
+box_length: [2.0, 1.0, 0.5]
+periodic: [false, false, true]
+step:
+  length: 0.6
+  height: 0.5
+mesh_options:
+  mesh_size: 0.4
+  max_dihedral: 150
+hierarchy:
+  levels: 3
+"""),
     ("tetra_sphere", """
 mesh_type: tetra
 box_length: [1.0, 1.0, 1.0]
