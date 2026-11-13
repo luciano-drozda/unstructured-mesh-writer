@@ -415,11 +415,11 @@ predicate_tests3()
 
 # Build one mesh with the core function. The obstacle tuples are
 # (kind, cx, cy, cz, hx, hy, hz). Kind 1 is a sphere. Kind 2 is a box.
-function build3(L, per, obs, h, hObs, grading; sweeps = 3, bound = 2.0, minDihedral = 0.0)
+function build3(L, per, obs, h, hObs, grading; sweeps = 3, bound = 2.0, minDihedral = 0.0, maxDihedral = 0.0)
     kinds = Int[o[1] for o in obs]
     f(i) = Float64[o[i] for o in obs]
     return WCore._triangulate_domain3(IOBuffer(), L, per, kinds, f(2), f(3), f(4), f(5), f(6), f(7),
-                                      h, hObs, grading, bound, sweeps, 2000000, minDihedral)
+                                      h, hObs, grading, bound, sweeps, 2000000, minDihedral, maxDihedral)
 end
 
 # Return the faces of a cell list: a Dict from a sorted vertex triple to
@@ -665,6 +665,60 @@ end
 check("min_dihedral above 60 is an error", raises(() -> WCore._resolve_mesh_options3(Dict("mesh_size" => 0.1, "min_dihedral" => 61.0))))
 check("min_dihedral below 0 is an error", raises(() -> WCore._resolve_mesh_options3(Dict("mesh_size" => 0.1, "min_dihedral" => -1.0))))
 check("min_dihedral defaults to 10", WCore._resolve_mesh_options3(Dict("mesh_size" => 0.1)).minDihedral == 10.0)
+
+# Goal for the largest dihedral angle.
+check("angle score: without a goal for the largest angle the score is the smallest angle",
+      WCore._angle_score3([0.5, 0.2], [2.0, 2.5], 0.1, Inf) == [0.5, 0.2])
+check("angle score: the score is the smaller of the two margins",
+      WCore._angle_score3([0.5, 0.2], [2.0, 2.5], 0.1, 2.4) ≈ [0.4, -0.1])
+check("angle score: with no goal for the smallest angle only the largest angle counts",
+      WCore._angle_score3([0.5, 0.2], [2.0, 2.5], 0.0, 2.4) ≈ [0.4, -0.1])
+check("max_dihedral defaults to 0", WCore._resolve_mesh_options3(Dict("mesh_size" => 0.1)).maxDihedral == 0.0)
+check("max_dihedral accepts 150", WCore._resolve_mesh_options3(Dict("mesh_size" => 0.1, "max_dihedral" => 150.0)).maxDihedral == 150.0)
+check("max_dihedral below 90 is an error", raises(() -> WCore._resolve_mesh_options3(Dict("mesh_size" => 0.1, "max_dihedral" => 80.0))))
+check("max_dihedral of 180 is an error", raises(() -> WCore._resolve_mesh_options3(Dict("mesh_size" => 0.1, "max_dihedral" => 180.0))))
+for (name, L, per, obs, h, hObs, g) in (("box", (1.0, 1.0, 1.0), (false, false, false), [], 0.2, 0.2, 0.3),
+                                        ("sphere", (1.0, 1.0, 1.0), (false, false, false), [(1, 0.5, 0.5, 0.5, 0.2, 0.2, 0.2)], 0.2, 0.1, 0.3),
+                                        ("periodic two obstacles", (2.0, 1.0, 1.0), (false, true, true),
+                                         [(1, 0.7, 0.5, 0.5, 0.2, 0.2, 0.2), (2, 1.4, 0.5, 0.5, 0.15, 0.2, 0.15)], 0.2, 0.1, 0.3))
+    m0 = build3(L, per, obs, h, hObs, g; sweeps = 0, minDihedral = 10.0)
+    m1 = build3(L, per, obs, h, hObs, g; sweeps = 0, minDihedral = 10.0, maxDihedral = 150.0)
+    pts0, cells0 = m0[1], m0[2]
+    pts1, cells1 = m1[1], m1[2]
+    v0, p0 = volume_info(pts0, cells0)
+    v1, p1 = volume_info(pts1, cells1)
+    check("max goal $name: the vertices are unchanged", pts0 == pts1 && m0[5] == m1[5])
+    check("max goal $name: the boundary faces are unchanged", boundary_faces(cells0) == boundary_faces(cells1))
+    check("max goal $name: the total volume is unchanged", isapprox(v0, v1; rtol = 1e-12))
+    check("max goal $name: every cell has a positive volume", p1)
+    check("max goal $name: every face belongs to 1 or 2 cells", all(length(v) <= 2 for v in values(face_table(cells1))))
+    check("max goal $name: the largest dihedral angle does not grow", m1[6].maxDihedralDeg <= m0[6].maxDihedralDeg + 1e-9)
+    check("max goal $name: the number of cells above the goal falls", m1[6].nAboveGoal < m1[6].nAboveStart || m1[6].nAboveStart == 0)
+    check("max goal $name: the smallest dihedral angle does not shrink", m1[6].minDihedralDeg >= m0[6].minDihedralDeg - 1e-9)
+    check("max goal $name: the radius-edge ratio stays within the bound", m1[6].maxRatio <= max(m0[6].maxRatio, 2.0) + 1e-12)
+    check_mesh3("$name with a max goal", L, per, obs, build3(L, per, obs, h, hObs, g; minDihedral = 10.0, maxDihedral = 150.0); hObs = hObs)
+end
+# The max goal alone also runs the flip pass. The count above the goal is reported.
+let m = build3((1.0, 1.0, 1.0), (false, false, false), [], 0.2, 0.2, 0.3; sweeps = 0, maxDihedral = 150.0),
+    m0 = build3((1.0, 1.0, 1.0), (false, false, false), [], 0.2, 0.2, 0.3; sweeps = 0)
+    check("max goal alone: flips happen", m[6].flipsDone > 0 && m0[6].flipsDone == 0)
+    check("max goal alone: the largest angle falls", m[6].maxDihedralDeg < m0[6].maxDihedralDeg)
+end
+# The log reports the goal. The warning appears only when cells stay above it.
+function tetra_log_max(goal)
+    cfg = WCore._check_config(Dict("mesh_type" => "tetra", "box_length" => [1.0, 1.0, 1.0], "periodic" => [false, false, false],
+                               "mesh_options" => Dict("mesh_size" => 0.2, "max_dihedral" => goal)))
+    buf = IOBuffer()
+    redirect_stdout(devnull) do
+        WCore._build_tetra(buf, cfg)
+    end
+    return String(take!(buf))
+end
+check("max goal log: the count above the goal is reported", occursin("above 150.0 degrees", tetra_log_max(150.0)))
+check("max goal log: a goal that the flips cannot reach gives a [warn] line", occursin("above the goal of 100.0", tetra_log_max(100.0)))
+check("max goal log: a reachable goal gives no [warn] line", !occursin("above the goal", tetra_log_max(170.0)))
+check("max goal log: the value 0 prints nothing about the goal", !occursin("above", tetra_log_max(0.0)))
+
 # The warning appears only when cells stay below the goal.
 function tetra_log(goal)
     cfg = WCore._check_config(Dict("mesh_type" => "tetra", "box_length" => [1.0, 1.0, 1.0], "periodic" => [false, false, false],

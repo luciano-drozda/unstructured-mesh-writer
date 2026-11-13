@@ -51,6 +51,20 @@ A flip is kept only when the new cells fill the same space with a positive volum
 and the radius-edge ratio stays within the larger of the old ratio and `radius_edge_bound`. The smoothing sweeps run after the flips.
 In the 10 reference `tetra` meshes the number of cells below 10 degrees fell from 210 to 4. `writer.py` has no such step.
 
+The key `mesh_options: max_dihedral` sets a goal for the largest dihedral angle, in degrees. The value must be 0 (off, the default) or in [90, 180). The flip pass uses the goal in the same way as `min_dihedral`.
+A cell is a candidate when it is below the first goal or above the second goal. A flip must raise the smaller of the two margins of the cells it replaces by at least 1 degree.
+The smoothing sweeps do not make the largest angle worse. The log gives the number of cells above the goal before and after the flips, and a `[warn]` line when cells stay above it.
+The value 150 is a good choice. Without the goal, the 10 reference `tetra` meshes have 1 to 10 cells above 160 degrees and a largest angle of 161 to 169 degrees. With the goal 150:
+
+| Result | Without `max_dihedral` | With `max_dihedral: 150` |
+|---|---|---|
+| Meshes with no cell above 160 degrees | 0 of 10 | 9 of 10 |
+| Largest angle | 161.2 to 169.2 degrees | 144.9 to 162.2 degrees |
+| Smallest angle | 7.4 to 12.0 degrees | 8.5 to 21.1 degrees |
+| Number of cells | reference | 1 to 3 percent fewer |
+
+The mesh `tet_per_ftt` (periodic in `y` and `z`) keeps 2 cells above 160 degrees. A second flip pass after the smoothing sweeps flips at most 2 cells per mesh at the goal 150. The writer does not run this pass.
+
 ## Loading a mesh into kernels (`writer.jl`)
 
 `load_mesh(path)` reads a `.h5` file of either writer and returns a `NamedTuple` with the layout that the kernels expect.

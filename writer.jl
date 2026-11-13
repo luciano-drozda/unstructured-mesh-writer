@@ -67,6 +67,10 @@ Keys in mesh_options:
                         remove the cells below the goal. The goal is not
                         a guarantee. The value must be in [0, 60]. The
                         value 0 turns the flips off. Default: 10.0.
+    max_dihedral        tetra only. Goal for the largest dihedral angle,
+                        in degrees. The flips use it in the same way as
+                        min_dihedral. The value must be 0 or in [90, 180).
+                        The value 0 turns the goal off. Default: 0.
     smoothing_sweeps    Number of Jacobi smoothing sweeps. Default: 3.
     max_vertices        Safety limit on the vertex count.
                         Default: 2000000 for triangle, 1000000 for tetra.
@@ -5334,7 +5338,7 @@ end
 # Check the mesh_options record. Set the defaults. Return a NamedTuple.
 function _resolve_mesh_options3(raw)
     raw isa AbstractDict || error("'mesh_options' must be a mapping")
-    known = ("mesh_size", "mesh_size_obstacle", "grading", "radius_edge_bound", "smoothing_sweeps", "max_vertices", "min_dihedral")
+    known = ("mesh_size", "mesh_size_obstacle", "grading", "radius_edge_bound", "smoothing_sweeps", "max_vertices", "min_dihedral", "max_dihedral")
     for k in keys(raw)
         k in known || error("mesh_options: unknown key '$k'. Valid keys: $(join(known, ", "))")
     end
@@ -5358,9 +5362,11 @@ function _resolve_mesh_options3(raw)
     (maxVertices >= 100 && maxVertices == floor(maxVertices)) || error("mesh_options['max_vertices'] must be a whole number, 100 or more")
     minDihedral = num("min_dihedral", 10.0)
     (minDihedral >= 0 && minDihedral <= 60) || error("mesh_options['min_dihedral'] must be in [0, 60]")
+    maxDihedral = num("max_dihedral", 0.0)
+    (maxDihedral == 0 || (maxDihedral >= 90 && maxDihedral < 180)) || error("mesh_options['max_dihedral'] must be 0 (off) or in [90, 180)")
     return (meshSize = meshSize, meshSizeObstacle = meshSizeObs, grading = grading,
             radiusEdgeBound = bound, smoothingSweeps = Int(sweeps), maxVertices = Int(maxVertices),
-            minDihedral = minDihedral)
+            minDihedral = minDihedral, maxDihedral = maxDihedral)
 end
 
 # Check each obstacle record. Raise an error for a bad field, for an
@@ -5480,13 +5486,14 @@ end
 # Return the smallest and the largest dihedral angle of all cells, in
 # degrees. Also return the number of cells with a dihedral angle below
 # goalRad. The goal is in radians.
-function _dihedral_stats3(pts::Matrix{Float64}, cells::Matrix{Int}, goalRad::Float64)
+function _dihedral_stats3(pts::Matrix{Float64}, cells::Matrix{Int}, goalRad::Float64, goalMaxRad::Float64 = Inf)
     m = size(cells, 1)
     minD = zeros(Float64, m)
     maxD = zeros(Float64, m)
     tet_dihedral_kernel(cells, pts, m, minD, maxD)
     nLow = count(<(goalRad), minD)
-    return rad2deg(minimum(minD)), rad2deg(maximum(maxD)), nLow
+    nHigh = count(>(goalMaxRad), maxD)
+    return rad2deg(minimum(minD)), rad2deg(maximum(maxD)), nLow, nHigh
 end
 
 # Compute four numbers for each tetrahedron: the smallest and the largest
@@ -5584,6 +5591,24 @@ function _edge_ring3(cells::Matrix{Int}, nbr::Matrix{Int}, c::Int, i::Int, j::In
     return Int[]
 end
 
+# Return the score of each cell for the flip pass. Without a goal for the
+# largest angle (goalMaxRad is Inf), the score is the smallest dihedral
+# angle. With a goal, the score is the smaller of two margins. The first
+# margin is the smallest angle minus its goal. The second margin is the
+# goal of the largest angle minus the largest angle. A score below 0
+# means that a goal is not met. When goalRad is 0, only the second margin
+# counts.
+function _angle_score3(minD::Vector{Float64}, maxD::Vector{Float64}, goalRad::Float64, goalMaxRad::Float64)
+    isfinite(goalMaxRad) || return minD
+    n = length(minD)
+    score = zeros(Float64, n)
+    for c in 1:n
+        hi = goalMaxRad - maxD[c]
+        score[c] = goalRad > 0 ? min(minD[c] - goalRad, hi) : hi
+    end
+    return score
+end
+
 # Make one pass of flips on a cell list. A flip changes the cells around
 # one face (2 cells become 3) or around one edge (3 cells become 2). It
 # does not move a vertex. The pass tries each flip that touches a cell
@@ -5598,11 +5623,11 @@ end
 # The vector why counts the failed candidates by test. Entry 1 is for
 # test 1. Entry 2 is for test 3. Entry 3 is for test 2.
 function _flip_pass3(pts::Matrix{Float64}, cells::Matrix{Int}, goalRad::Float64, ratioBound::Float64, gainMin::Float64,
-                     why::Vector{Int} = zeros(Int, 4))
+                     why::Vector{Int} = zeros(Int, 4), goalMaxRad::Float64 = Inf)
     nC = size(cells, 1)
     size(pts, 1) < 2^21 || return cells, 0, 0
     minD, maxD, vol, ratio = _cell_numbers3(pts, cells)
-    bad = Int[c for c in 1:nC if minD[c] < goalRad]
+    bad = Int[c for c in 1:nC if minD[c] < goalRad || maxD[c] > goalMaxRad]
     isempty(bad) && return cells, 0, 0
     nbr = _cell_neighbors3(cells)
 
@@ -5664,6 +5689,10 @@ function _flip_pass3(pts::Matrix{Float64}, cells::Matrix{Int}, goalRad::Float64,
         end
     end
     cD, cDmax, cvol, cratio = _cell_numbers3(pts, cand)
+    # The score of a cell is its smallest dihedral angle. With a goal for
+    # the largest angle, the score is the smaller margin to the two goals.
+    scoreOld = _angle_score3(minD, maxD, goalRad, goalMaxRad)
+    scoreNew = _angle_score3(cD, cDmax, goalRad, goalMaxRad)
 
     # ---- Reduce the numbers of the new and of the old cells.
     idNew = collect(1:nNew)
@@ -5671,13 +5700,13 @@ function _flip_pass3(pts::Matrix{Float64}, cells::Matrix{Int}, goalRad::Float64,
     newVolMin = zeros(Float64, nG); newVolSum = zeros(Float64, nG)
     group_extrema_kernel(cvol, idNew, newStart, newCount, nG, newVolMin, hi, newVolSum)
     newDMin = zeros(Float64, nG)
-    group_extrema_kernel(cD, idNew, newStart, newCount, nG, newDMin, hi, sm)
+    group_extrema_kernel(scoreNew, idNew, newStart, newCount, nG, newDMin, hi, sm)
     newRatioMax = zeros(Float64, nG)
     group_extrema_kernel(cratio, idNew, newStart, newCount, nG, lo, newRatioMax, sm)
     oldVolSum = zeros(Float64, nG)
     group_extrema_kernel(vol, oldIdx, oldStart, oldCount, nG, lo, hi, oldVolSum)
     oldDMin = zeros(Float64, nG)
-    group_extrema_kernel(minD, oldIdx, oldStart, oldCount, nG, oldDMin, hi, sm)
+    group_extrema_kernel(scoreOld, oldIdx, oldStart, oldCount, nG, oldDMin, hi, sm)
     oldRatioMax = zeros(Float64, nG)
     group_extrema_kernel(ratio, oldIdx, oldStart, oldCount, nG, lo, oldRatioMax, sm)
 
@@ -5750,11 +5779,13 @@ end
 # hMax, hObs, grading, ratioBound, sweeps, maxVertices: the mesh options
 # minDihedral: goal for the smallest dihedral angle, in degrees. The flip
 #   pass runs when it is above 0.
+# maxDihedral: goal for the largest dihedral angle, in degrees. 0 is off.
+#   The flip pass runs when it is above 0.
 function _triangulate_domain3(logBuf::IOBuffer, L::NTuple{3,Float64}, per::NTuple{3,Bool},
                               obsKind::Vector{Int}, obsCx::Vector{Float64}, obsCy::Vector{Float64}, obsCz::Vector{Float64},
                               obsHx::Vector{Float64}, obsHy::Vector{Float64}, obsHz::Vector{Float64},
                               hMax::Float64, hObs::Float64, grading::Float64, ratioBound::Float64,
-                              sweeps::Int, maxVertices::Int, minDihedral::Float64 = 0.0)
+                              sweeps::Int, maxVertices::Int, minDihedral::Float64 = 0.0, maxDihedral::Float64 = 0.0)
     nObs = length(obsKind)
     hObsUsed = nObs == 0 ? hMax : hObs
     M = _new_mesher3(4096, 16384, 1024, 1024, maxVertices)
@@ -5849,12 +5880,14 @@ function _triangulate_domain3(logBuf::IOBuffer, L::NTuple{3,Float64}, per::NTupl
     # ---- Flip the cells around slivers. Each pass flips faces and edges
     # of the cells below the goal. The vertices stay where they are.
     reportRad = deg2rad(minDihedral > 0 ? minDihedral : 10.0)
+    goalMaxRad = maxDihedral > 0 ? deg2rad(maxDihedral) : Inf
     nBelowStart = _dihedral_stats3(pts, cells, reportRad)[3]
+    nAboveStart = _dihedral_stats3(pts, cells, reportRad, goalMaxRad)[4]
     flipsDone = 0
-    if minDihedral > 0
+    if minDihedral > 0 || maxDihedral > 0
         for pass in 1:10
             why = zeros(Int, 4)
-            cells, nTried, nDone = _flip_pass3(pts, cells, deg2rad(minDihedral), ratioBound, deg2rad(1.0), why)
+            cells, nTried, nDone = _flip_pass3(pts, cells, deg2rad(minDihedral), ratioBound, deg2rad(1.0), why, goalMaxRad)
             _log(logBuf, "  flip pass $pass: $nTried candidates, $nDone flips. Rejected: $(why[1]) by volume, $(why[2]) by radius-edge ratio, $(why[3]) by angle gain")
             flipsDone += nDone
             nDone == 0 && break
@@ -5886,7 +5919,7 @@ function _triangulate_domain3(logBuf::IOBuffer, L::NTuple{3,Float64}, per::NTupl
     avgPts = zeros(Float64, nPts, 3)
     newPts = zeros(Float64, nPts, 3)
     v2cOff, v2cIdx = _vertex_to_cell(nPts, cells)
-    minDeg, maxDeg, nLow = _dihedral_stats3(pts, cells, reportRad)
+    minDeg, maxDeg, nLow, nHigh = _dihedral_stats3(pts, cells, reportRad, goalMaxRad)
     sweepsDone = 0
     for _ in 1:sweeps
         smooth_jacobi_3d_kernel(pts, nbrOff, nbrIdx, nPts, avgPts)
@@ -5900,10 +5933,11 @@ function _triangulate_domain3(logBuf::IOBuffer, L::NTuple{3,Float64}, per::NTupl
             nNeg[1] = 0
             count_negative_kernel(meas, nCells, nNeg)
             if nNeg[1] == 0
-                minNew, maxNew, nLowNew = _dihedral_stats3(newPts, cells, reportRad)
-                if minNew >= minDeg
+                minNew, maxNew, nLowNew, nHighNew = _dihedral_stats3(newPts, cells, reportRad, goalMaxRad)
+                # With a goal for the largest angle, the largest angle may not grow.
+                if minNew >= minDeg && (maxDihedral == 0 || maxNew <= maxDeg)
                     pts, newPts = newPts, pts
-                    minDeg, maxDeg, nLow = minNew, maxNew, nLowNew
+                    minDeg, maxDeg, nLow, nHigh = minNew, maxNew, nLowNew, nHighNew
                     accepted = true
                     break
                 end
@@ -5917,6 +5951,7 @@ function _triangulate_domain3(logBuf::IOBuffer, L::NTuple{3,Float64}, per::NTupl
 
     info = (nVertices = nPts, nCells = nCells, nEdges = nEdges, minDihedralDeg = minDeg,
             maxDihedralDeg = maxDeg, nBelowGoal = nLow, nBelowStart = nBelowStart,
+            nAboveGoal = nHigh, nAboveStart = nAboveStart,
             goalDeg = rad2deg(reportRad), flipsDone = flipsDone, maxRatio = maxRatio,
             sweepsDone = sweepsDone, exactShare = exactShare, boxSize = Lq)
     return pts, cells, edges, c2e, labels, info
@@ -6216,12 +6251,18 @@ function _build_tetra(logBuf::IOBuffer, cfg::Dict)
     pts, cells, edges, c2e, ptMk, info = _triangulate_domain3(logBuf,
         L, per, obsKind, obsCx, obsCy, obsCz, obsHx, obsHy, obsHz,
         opts.meshSize, hObs, opts.grading, opts.radiusEdgeBound,
-        opts.smoothingSweeps, opts.maxVertices, opts.minDihedral)
+        opts.smoothingSweeps, opts.maxVertices, opts.minDihedral, opts.maxDihedral)
     _log(logBuf, "  tetra: $(info.nVertices) vertices, $(info.nCells) cells")
     _log(logBuf, "  dihedral angles: smallest $(round(info.minDihedralDeg, digits = 2)), largest $(round(info.maxDihedralDeg, digits = 2)) degrees")
     _log(logBuf, "  cells with a dihedral angle below $(info.goalDeg) degrees: $(info.nBelowStart) before the flips, $(info.nBelowGoal) at the end ($(info.flipsDone) flips)")
     if opts.minDihedral > 0 && info.nBelowGoal > 0
         _log(logBuf, "  [warn] tetra: $(info.nBelowGoal) cells have a dihedral angle below the goal of $(opts.minDihedral) degrees. The flips could not remove them.")
+    end
+    if opts.maxDihedral > 0
+        _log(logBuf, "  cells with a dihedral angle above $(opts.maxDihedral) degrees: $(info.nAboveStart) before the flips, $(info.nAboveGoal) at the end")
+        if info.nAboveGoal > 0
+            _log(logBuf, "  [warn] tetra: $(info.nAboveGoal) cells have a dihedral angle above the goal of $(opts.maxDihedral) degrees. The flips could not remove them.")
+        end
     end
     _log(logBuf, "  largest radius-edge ratio after smoothing: $(round(info.maxRatio, digits = 3))")
     _log(logBuf, "  smoothing sweeps kept: $(info.sweepsDone) of $(opts.smoothingSweeps)")
