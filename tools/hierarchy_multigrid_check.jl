@@ -443,6 +443,22 @@ step:
 hierarchy:
   levels: 3
 """),
+    ("triangle_step", """
+mesh_type: triangle
+box_length: [4.0, 2.0]
+step:
+  length: 1.0
+  height: 1.0
+mesh_options:
+  mesh_size: 0.4
+  mesh_size_obstacle: 0.25
+obstacles:
+  - shape: circle
+    center: [2.5, 1.0]
+    radius: 0.3
+hierarchy:
+  levels: 4
+"""),
     ("gridsplit_stretched", """
 mesh_type: gridsplit
 box_length: [1.0, 1.0]

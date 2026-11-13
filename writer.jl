@@ -968,11 +968,11 @@ end
 # ── 2-D Delaunay kernels ──────────────────────────────────────────────
 
 # size_field_2d_kernel(px, py, n, obsKind, obsCx, obsCy, obsHx, obsHy,
-#                      nObs, hMax, hObs, grading, h)
+#                      nObs, stepL, stepH, hMax, hObs, grading, h)
 #
 # Compute the target size at each query point. The target size is hObs
-# on an obstacle boundary. It grows with the distance to the nearest
-# obstacle boundary. It never exceeds hMax.
+# on an obstacle boundary and on the step. It grows with the distance
+# to the nearest obstacle or step. It never exceeds hMax.
 #
 # px: x coordinate of each query point
 # py: y coordinate of each query point
@@ -983,11 +983,13 @@ end
 # obsHx: radius of a circle, or half the x extent of a rectangle
 # obsHy: radius of a circle, or half the y extent of a rectangle
 # nObs: number of obstacles
+# stepL: length of the step block along x, or 0 for a domain without step
+# stepH: height of the step block along y
 # hMax: target size far from obstacles
-# hObs: target size on obstacle boundaries
+# hObs: target size on obstacle boundaries and on the step
 # grading: growth of the target size per unit of distance
 # h: length-n output array
-function size_field_2d_kernel(px, py, n, obsKind, obsCx, obsCy, obsHx, obsHy, nObs, hMax, hObs, grading, h)
+function size_field_2d_kernel(px, py, n, obsKind, obsCx, obsCy, obsHx, obsHy, nObs, stepL, stepH, hMax, hObs, grading, h)
     for i = 1:n
         x = px[i]
         y = py[i]
@@ -1005,6 +1007,13 @@ function size_field_2d_kernel(px, py, n, obsKind, obsCx, obsCy, obsHx, obsHy, nO
                 dk = abs(sqrt(ox * ox + oy * oy) + min(max(qx, qy), 0.0))
             end
             d = min(d, dk)
+        end
+        # The step block is the rectangle [0, stepL] x [0, stepH]. A query
+        # point lies outside it, so the distance uses the clipped offsets.
+        if stepL > 0.0
+            ox = max(x - stepL, 0.0)
+            oy = max(y - stepH, 0.0)
+            d = min(d, sqrt(ox * ox + oy * oy))
         end
         h[i] = min(hMax, hObs + grading * d)
     end
@@ -1046,6 +1055,65 @@ function box_side_vertices_kernel(nx, ny, px, py, vx, vy)
         idx = 2 * nx + ny + j
         vx[idx] = px[1]
         vy[idx] = py[ny - j + 2]
+    end
+    return nothing
+end
+
+# step_loop_vertices_kernel(Lx, Ly, stepL, stepH, nb, nr, nt, nl, nf, nh, vx, vy)
+#
+# Fill the vertices on the six sides of a box with a step. The order is
+# counterclockwise. It starts at the foot of the step face, (stepL, 0).
+# Each corner belongs to the side that starts at that corner. The sides
+# are the bottom, the right side, the top, the left side above the
+# step, the step floor and the step face. Each side has equal spacing.
+#
+# Lx: box length along x
+# Ly: box length along y
+# stepL: length of the step block along x
+# stepH: height of the step block along y
+# nb: number of segments on the bottom side, from x = stepL to x = Lx
+# nr: number of segments on the right side
+# nt: number of segments on the top side
+# nl: number of segments on the left side, from y = Ly to y = stepH
+# nf: number of segments on the step floor
+# nh: number of segments on the step face
+# vx: output array for the x coordinates
+# vy: output array for the y coordinates
+function step_loop_vertices_kernel(Lx, Ly, stepL, stepH, nb, nr, nt, nl, nf, nh, vx, vy)
+    # bottom side, from left to right
+    for i = 1:nb
+        vx[i] = stepL + (Lx - stepL) * (i - 1) / nb
+        vy[i] = 0.0
+    end
+    # right side, from bottom to top
+    for j = 1:nr
+        idx = nb + j
+        vx[idx] = Lx
+        vy[idx] = Ly * (j - 1) / nr
+    end
+    # top side, from right to left
+    for i = 1:nt
+        idx = nb + nr + i
+        vx[idx] = Lx - Lx * (i - 1) / nt
+        vy[idx] = Ly
+    end
+    # left side, from top down to the step height
+    for j = 1:nl
+        idx = nb + nr + nt + j
+        vx[idx] = 0.0
+        vy[idx] = Ly - (Ly - stepH) * (j - 1) / nl
+    end
+    # step floor, from left to right
+    for i = 1:nf
+        idx = nb + nr + nt + nl + i
+        vx[idx] = stepL * (i - 1) / nf
+        vy[idx] = stepH
+    end
+    # step face, from the floor down to the bottom
+    for j = 1:nh
+        idx = nb + nr + nt + nl + nf + j
+        vx[idx] = stepL
+        vy[idx] = stepH - stepH * (j - 1) / nh
     end
     return nothing
 end
@@ -2688,6 +2756,8 @@ function _new_mesher2(capV::Int, capC::Int, capS::Int, maxVertices::Int)
         nObs = Ref{Int}(0),
         hMax = Ref{Float64}(1.0),
         hObs = Ref{Float64}(1.0),
+        stepL = Ref{Float64}(0.0),
+        stepH = Ref{Float64}(0.0),
         grading = Ref{Float64}(0.0),
         ratioBound = Ref{Float64}(1.0),
         doBad = Ref{Bool}(false),
@@ -3097,7 +3167,7 @@ end
 function _bad_cells2!(M::NamedTuple, n::Int, push::Bool)
     cell_circumcenter_2d_kernel(M.cellV[], M.vx, M.vy, M.wCell, n, M.ccx, M.ccy, M.ccR)
     size_field_2d_kernel(M.ccx, M.ccy, n, M.obsKind[], M.obsCx[], M.obsCy[], M.obsHx[], M.obsHy[],
-                         M.nObs[], M.hMax[], M.hObs[], M.grading[], M.hAt)
+                         M.nObs[], M.stepL[], M.stepH[], M.hMax[], M.hObs[], M.grading[], M.hAt)
     cell_quality_2d_kernel(M.cellV[], M.vx, M.vy, M.wCell, n, M.ccR, M.hAt, M.ratio, M.sizeRatio)
     nBad = 0
     for k in 1:n
@@ -3440,7 +3510,7 @@ end
 # Check each obstacle record. Raise an error for a bad field, for an
 # obstacle that crosses or touches the box, and for two obstacles whose
 # bounding boxes overlap. Warn when a gap is smaller than hObs.
-function _validate_obstacles2(logBuf::IOBuffer, obstacles, box::Tuple, hObs::Float64)
+function _validate_obstacles2(logBuf::IOBuffer, obstacles, box::Tuple, hObs::Float64, step = nothing)
     isempty(obstacles) && return
     lo = Vector{Vector{Float64}}()
     hi = Vector{Vector{Float64}}()
@@ -3479,6 +3549,17 @@ function _validate_obstacles2(logBuf::IOBuffer, obstacles, box::Tuple, hObs::Flo
             error("obstacles $(i-1) and $(j-1): the bounding boxes overlap")
         elseif separation < hObs
             _log(logBuf, "  [warn] obstacles $(i-1) and $(j-1): the gap is smaller than mesh_size_obstacle")
+        end
+    end
+    # The step block [0, length] x [0, height] is one more bounding box.
+    if step !== nothing
+        for i in 1:n
+            separation = max(lo[i][1] - step.length, lo[i][2] - step.height)
+            if separation <= 0
+                error("obstacle $(i-1): the bounding box overlaps or touches the step")
+            elseif separation < hObs
+                _log(logBuf, "  [warn] obstacle $(i-1): the gap to the step is smaller than mesh_size_obstacle")
+            end
         end
     end
 end
@@ -3522,14 +3603,24 @@ function _triangulate_domain2(logBuf::IOBuffer, Lx::Float64, Ly::Float64, perX::
                              obsKind::Vector{Int}, obsCx::Vector{Float64}, obsCy::Vector{Float64},
                              obsHx::Vector{Float64}, obsHy::Vector{Float64},
                              hMax::Float64, hObs::Float64, grading::Float64,
-                             minAngle::Float64, sweeps::Int, maxVertices::Int)
+                             minAngle::Float64, sweeps::Int, maxVertices::Int,
+                             stepL::Float64 = 0.0, stepH::Float64 = 0.0)
     nObs = length(obsKind)
-    hObsUsed = nObs == 0 ? hMax : hObs
+    hasStep = stepL > 0.0
+    hasStep && (perX || perY) && error("internal error: a step needs a domain that is not periodic along x and y")
+    hObsUsed = (nObs == 0 && !hasStep) ? hMax : hObs
 
     # ---- Count the boundary vertices.
     nx = max(1, ceil(Int, Lx / hMax))
     ny = max(1, ceil(Int, Ly / hMax))
     nBox = 2 * nx + 2 * ny
+    # A box with a step has six sides. The right side and the top side keep
+    # the counts ny and nx.
+    nsb = hasStep ? max(1, ceil(Int, (Lx - stepL) / hMax)) : 0
+    nsl = hasStep ? max(1, ceil(Int, (Ly - stepH) / hMax)) : 0
+    nsf = hasStep ? max(1, ceil(Int, stepL / hMax)) : 0
+    nsh = hasStep ? max(1, ceil(Int, stepH / hMax)) : 0
+    hasStep && (nBox = nsb + ny + nx + nsl + nsf + nsh)
     nPer = zeros(Int, nObs)
     mxs = zeros(Int, nObs)
     mys = zeros(Int, nObs)
@@ -3557,7 +3648,11 @@ function _triangulate_domain2(logBuf::IOBuffer, Lx::Float64, Ly::Float64, perX::
     end
     bx = zeros(Float64, nBnd)
     by = zeros(Float64, nBnd)
-    box_side_vertices_kernel(nx, ny, px, py, bx, by)
+    if hasStep
+        step_loop_vertices_kernel(Lx, Ly, stepL, stepH, nsb, ny, nx, nsl, nsf, nsh, bx, by)
+    else
+        box_side_vertices_kernel(nx, ny, px, py, bx, by)
+    end
     offset = nBox
     for k in 1:nObs
         if obsKind[k] == 1
@@ -3573,6 +3668,7 @@ function _triangulate_domain2(logBuf::IOBuffer, Lx::Float64, Ly::Float64, perX::
     M.obsKind[] = obsKind; M.obsCx[] = obsCx; M.obsCy[] = obsCy; M.obsHx[] = obsHx; M.obsHy[] = obsHy
     M.nObs[] = nObs
     M.hMax[] = hMax; M.hObs[] = hObsUsed; M.grading[] = grading
+    M.stepL[] = stepL; M.stepH[] = stepH
     M.ratioBound[] = 1.0 / (2.0 * sind(minAngle))
     ccx = 0.5 * Lx
     ccy = 0.5 * Ly
@@ -3596,6 +3692,9 @@ function _triangulate_domain2(logBuf::IOBuffer, Lx::Float64, Ly::Float64, perX::
         a = 3 + k
         b = 3 + (k == nBox ? 1 : k + 1)
         axis = (k <= nx || (k > nx + ny && k <= 2 * nx + ny)) ? 1 : 2
+        # In a box with a step the sides have other counts. A horizontal
+        # side has equal y at its two ends.
+        hasStep && (axis = abs(by[k] - by[k == nBox ? 1 : k + 1]) <= 1.0e-12 * Ly ? 1 : 2)
         _add_segment2!(M, a, b, 0, axis)
     end
     if perY
@@ -3679,7 +3778,7 @@ function _triangulate_domain2(logBuf::IOBuffer, Lx::Float64, Ly::Float64, perX::
     end
     tol = 1.0e-9 * max(Lx, Ly)
     ptMk = zeros(Int32, nPts)
-    point_markers_2d_domain_kernel(pts, nPts, Lx, Ly, tol, obsKind, obsCx, obsCy, obsHx, obsHy, nObs, 0.0, 0.0, ptMk)
+    point_markers_2d_domain_kernel(pts, nPts, Lx, Ly, tol, obsKind, obsCx, obsCy, obsHx, obsHy, nObs, stepL, stepH, ptMk)
 
     # ---- Smooth the interior vertices with Jacobi sweeps. A sweep stays
     # only when no cell flips and the worst radius-edge ratio does not grow.
@@ -3719,7 +3818,7 @@ function _triangulate_domain2(logBuf::IOBuffer, Lx::Float64, Ly::Float64, perX::
 
     # ---- Edge markers.
     edgeMk = zeros(Int32, nEdges)
-    edge_markers_2d_domain_kernel(pts, edges, isBnd, nEdges, Lx, Ly, tol, obsKind, obsCx, obsCy, obsHx, obsHy, nObs, 0.0, 0.0, edgeMk)
+    edge_markers_2d_domain_kernel(pts, edges, isBnd, nEdges, Lx, Ly, tol, obsKind, obsCx, obsCy, obsHx, obsHy, nObs, stepL, stepH, edgeMk)
 
     info = (nVertices = nPts, nCells = nCells, nEdges = nEdges, maxRatio = worst,
             minAngleDeg = asind(1.0 / (2.0 * worst)), sweepsDone = sweepsDone)
@@ -6436,8 +6535,9 @@ function _build_triangle(logBuf::IOBuffer, cfg::Dict)
     per = cfg["periodic"]
     obstacles = cfg["obstacles"]
     opts = cfg["mesh_options"]
-    hObs = isempty(obstacles) ? opts.meshSize : opts.meshSizeObstacle
-    _validate_obstacles2(logBuf, obstacles, cfg["box_length"], hObs)
+    step = cfg["step"]
+    hObs = (isempty(obstacles) && step === nothing) ? opts.meshSize : opts.meshSizeObstacle
+    _validate_obstacles2(logBuf, obstacles, cfg["box_length"], hObs, step)
 
     nObs = length(obstacles)
     obsKind = zeros(Int, nObs)
@@ -6466,12 +6566,13 @@ function _build_triangle(logBuf::IOBuffer, cfg::Dict)
     pts, cells, edges, c2e, ptMk, edgeMk, info = _triangulate_domain2(logBuf,
         Lx, Ly, per[1], per[2], obsKind, obsCx, obsCy, obsHx, obsHy,
         opts.meshSize, hObs, opts.grading, opts.minAngle,
-        opts.smoothingSweeps, opts.maxVertices)
+        opts.smoothingSweeps, opts.maxVertices,
+        step === nothing ? 0.0 : step.length, step === nothing ? 0.0 : step.height)
     _log(logBuf, "  triangle: $(info.nVertices) vertices, $(info.nCells) cells")
     _log(logBuf, "  smallest cell angle: $(round(info.minAngleDeg, digits = 2)) degrees")
     _log(logBuf, "  smoothing sweeps kept: $(info.sweepsDone) of $(opts.smoothingSweeps)")
     return _builder_result(pts, cells, ptMk, edgeMk, edges, c2e, obstacleMeta,
-                           cfg["box_length"], info, :given, ())
+                           cfg["box_length"], info, :given, (), step)
 end
 
 # Build one tetrahedral mesh of a box with obstacles from a config.
@@ -6809,7 +6910,7 @@ end
 
 # Return the mesh types that accept the key step.
 function _step_types()
-    return ("gridsplit", "kuhn")
+    return ("gridsplit", "kuhn", "triangle")
 end
 
 # Check the config value of the key step. Return nothing when the key is

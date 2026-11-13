@@ -1447,6 +1447,126 @@ let
     check("kuhn step: periodic along z is valid", WCore._check_config(cfgP)["step"] == (length = 1.0, height = 1.0))
 end
 
+# ── Step: triangle ───────────────────────────────────────────────────────
+
+println("Step: triangle")
+# The loop kernel and the size field.
+let
+    nb, nr, nt, nl, nf, nh = 3, 2, 4, 1, 2, 2
+    n = nb + nr + nt + nl + nf + nh
+    vx = zeros(n); vy = zeros(n)
+    WCore.step_loop_vertices_kernel(6.0, 2.0, 1.5, 0.8, nb, nr, nt, nl, nf, nh, vx, vy)
+    check("step loop: the first vertex is the foot of the step face", vx[1] == 1.5 && vy[1] == 0.0)
+    corners = [(Tuple([vx[k], vy[k]])) for k in (1, nb + 1, nb + nr + 1, nb + nr + nt + 1, nb + nr + nt + nl + 1, nb + nr + nt + nl + nf + 1)]
+    check("step loop: the six corners are exact", corners == [(1.5, 0.0), (6.0, 0.0), (6.0, 2.0), (0.0, 2.0), (0.0, 0.8), (1.5, 0.8)])
+    # Each side has equal spacing and the loop turns counterclockwise.
+    area = 0.0
+    for k in 1:n
+        k2 = k == n ? 1 : k + 1
+        area += 0.5 * (vx[k] * vy[k2] - vx[k2] * vy[k])
+    end
+    check("step loop: the loop is counterclockwise and encloses the L shape", abs(area - (6.0 * 2.0 - 1.5 * 0.8)) < 1e-12)
+    len = [hypot(vx[k == n ? 1 : k + 1] - vx[k], vy[k == n ? 1 : k + 1] - vy[k]) for k in 1:n]
+    check("step loop: the bottom segments have equal length", all(abs.(len[1:nb] .- 4.5 / nb) .< 1e-12))
+    check("step loop: the floor and face segments have equal length", all(abs.(len[n - nf - nh + 1:n - nh] .- 1.5 / nf) .< 1e-12) && all(abs.(len[n - nh + 1:n] .- 0.8 / nh) .< 1e-12))
+    px = [0.5, 1.0, 1.4, 3.0, 5.0]; py = [0.2, 0.8, 1.0, 1.9, 0.3]
+    h = zeros(5)
+    noKind = zeros(Int, 0); noVal = zeros(Float64, 0)
+    WCore.size_field_2d_kernel(px, py, 5, noKind, noVal, noVal, noVal, noVal, 0, 1.5, 0.8, 0.5, 0.1, 0.3, h)
+    # d = distance to the block [0, 1.5] x [0, 0.8]: 0, 0, 0.2 (to the face), 1.5 (to the face), 3.5
+    check("size field: the distance to the step block", abs(h[1] - 0.1) < 1e-12 && abs(h[2] - 0.1) < 1e-12 &&
+          abs(h[3] - (0.1 + 0.3 * 0.2)) < 1e-12 && abs(h[4] - 0.5) < 1e-12 && abs(h[5] - 0.5) < 1e-12)
+    h0 = zeros(5)
+    WCore.size_field_2d_kernel(px, py, 5, noKind, noVal, noVal, noVal, noVal, 0, 0.0, 0.0, 0.5, 0.1, 0.3, h0)
+    check("size field: a length of 0 switches the step off", all(h0 .== 0.5))
+    # A point above the block corner uses the distance to the corner.
+    h1 = zeros(1)
+    WCore.size_field_2d_kernel([2.1], [1.4], 1, noKind, noVal, noVal, noVal, noVal, 0, 1.5, 0.8, 0.5, 0.1, 0.1, h1)
+    check("size field: the distance to the corner of the block", abs(h1[1] - (0.1 + 0.1 * hypot(0.6, 0.6))) < 1e-12)
+end
+# The obstacle check knows the step.
+let
+    box = (6.0, 2.0)
+    step = (length = 1.0, height = 0.8)
+    circ(c, r) = [Dict("shape" => "circle", "center" => c, "radius" => r)]
+    check("step obstacles: a circle that overlaps the step block is an error",
+          occursin("overlaps or touches the step", something(errmsg(() -> WCore._validate_obstacles2(IOBuffer(), circ([1.0, 0.8], 0.3), box, 0.1, step)), "")))
+    check("step obstacles: a circle that touches the step floor is an error",
+          raises(() -> WCore._validate_obstacles2(IOBuffer(), circ([0.5, 1.2], 0.4), box, 0.1, step)))
+    check("step obstacles: a circle downstream of the step is valid",
+          !raises(() -> WCore._validate_obstacles2(IOBuffer(), circ([3.0, 1.0], 0.3), box, 0.1, step)))
+    check("step obstacles: a circle above the step floor is valid",
+          !raises(() -> WCore._validate_obstacles2(IOBuffer(), circ([0.5, 1.4], 0.3), box, 0.1, step)))
+    buf = IOBuffer()
+    WCore._validate_obstacles2(buf, circ([1.35, 1.1], 0.3), box, 0.1, step)
+    check("step obstacles: a gap below mesh_size_obstacle gives a warning", occursin("gap to the step", String(take!(buf))))
+    check("step obstacles: the same circle without a step gives no step message",
+          !raises(() -> WCore._validate_obstacles2(IOBuffer(), circ([1.0, 0.8], 0.3), box, 0.1)))
+end
+# The mesh.
+let
+    function area_of(m)
+        a = 0.0
+        for c in 1:size(m.cells, 1)
+            i, j, k = m.cells[c, 1], m.cells[c, 2], m.cells[c, 3]
+            a += 0.5 * ((m.pts[j, 1] - m.pts[i, 1]) * (m.pts[k, 2] - m.pts[i, 2]) - (m.pts[k, 1] - m.pts[i, 1]) * (m.pts[j, 2] - m.pts[i, 2]))
+        end
+        return a
+    end
+    function length_of(m, mk)
+        t = 0.0
+        for e in 1:size(m.edges, 1)
+            m.edgeMk[e] == mk || continue
+            a, b = m.edges[e, 1], m.edges[e, 2]
+            t += hypot(m.pts[a, 1] - m.pts[b, 1], m.pts[a, 2] - m.pts[b, 2])
+        end
+        return t
+    end
+    for (Lx, Ly, xs, h, hm) in ((4.0, 2.0, 1.0, 1.0, 0.25), (6.0, 2.0, 1.3, 0.9, 0.3), (3.0, 1.0, 0.45, 0.55, 0.2))
+        cfg = WCore._check_config(Dict("mesh_type" => "triangle", "box_length" => [Lx, Ly], "step" => Dict("length" => xs, "height" => h),
+                                       "mesh_options" => Dict("mesh_size" => hm)))
+        m = WCore._build_triangle(IOBuffer(), cfg)
+        tag = "triangle step $Lx x $Ly, step $xs x $h"
+        check("$tag: the area is the box area minus the step", abs(area_of(m) - (Lx * Ly - xs * h)) < 1e-10)
+        check("$tag: every cell has a positive area", all(c -> area_of((pts = m.pts, cells = m.cells[c:c, :])) > 0, 1:size(m.cells, 1)))
+        check("$tag: the smallest angle meets the goal", m.info.minAngleDeg >= 20.0 - 1e-9)
+        check("$tag: no cell centroid lies inside the step block",
+              all(c -> (cx = sum(m.pts[m.cells[c, :], 1]) / 3; cy = sum(m.pts[m.cells[c, :], 2]) / 3; !(cx < xs && cy < h)), 1:size(m.cells, 1)))
+        check("$tag: the result carries the step", m.step == (length = xs, height = h))
+        check("$tag: the floor length is the step length", abs(length_of(m, 5) - xs) < 1e-12)
+        check("$tag: the face length is the step height", abs(length_of(m, 6) - h) < 1e-12)
+        check("$tag: the other sides have the right lengths",
+              abs(length_of(m, 1) - (Lx - xs)) < 1e-12 && abs(length_of(m, 2) - Ly) < 1e-12 &&
+              abs(length_of(m, 3) - Lx) < 1e-12 && abs(length_of(m, 4) - (Ly - h)) < 1e-12)
+        function mk_at(x, y)
+            r = findfirst(v -> abs(m.pts[v, 1] - x) < 1e-12 && abs(m.pts[v, 2] - y) < 1e-12, 1:size(m.pts, 1))
+            return r === nothing ? -1 : Int(m.ptMk[r])
+        end
+        check("$tag: the reentrant corner has the floor marker 5", mk_at(xs, h) == 5)
+        check("$tag: the inlet corner at the step height has the marker 4", mk_at(0.0, h) == 4)
+        check("$tag: the foot of the step face has the bottom marker 1", mk_at(xs, 0.0) == 1)
+        check("$tag: the box corners carry the markers 2 and 3", mk_at(Lx, 0.0) == 1 && mk_at(Lx, Ly) == 2 && mk_at(0.0, Ly) == 3)
+        check("$tag: the vertex markers match the edge markers", all(Int(m.ptMk[v]) != 0 for e in 1:size(m.edges, 1) if m.edgeMk[e] != 0 for v in m.edges[e, :]))
+    end
+    # The mesh is finer near the step when mesh_size_obstacle is small.
+    base = Dict("mesh_type" => "triangle", "box_length" => [4.0, 2.0], "step" => Dict("length" => 1.0, "height" => 1.0))
+    coarse = WCore._build_triangle(IOBuffer(), WCore._check_config(merge(base, Dict("mesh_options" => Dict("mesh_size" => 0.5)))))
+    fine = WCore._build_triangle(IOBuffer(), WCore._check_config(merge(base, Dict("mesh_options" => Dict("mesh_size" => 0.5, "mesh_size_obstacle" => 0.1)))))
+    check("triangle step: a small mesh_size_obstacle refines the step walls", size(fine.cells, 1) > 2 * size(coarse.cells, 1))
+    # An obstacle downstream of the step.
+    cfgC = WCore._check_config(Dict("mesh_type" => "triangle", "box_length" => [6.0, 2.0], "step" => Dict("length" => 1.3, "height" => 0.9),
+                                    "mesh_options" => Dict("mesh_size" => 0.3, "mesh_size_obstacle" => 0.1),
+                                    "obstacles" => [Dict("shape" => "rectangle", "center" => [3.5, 1.2], "half_extents" => [0.3, 0.2]),
+                                                    Dict("shape" => "circle", "center" => [4.8, 1.0], "radius" => 0.25)]))
+    mC = WCore._build_triangle(IOBuffer(), cfgC)
+    check("triangle step: the obstacles keep the markers 10 and 11", count(==(10), mC.edgeMk) > 0 && count(==(11), mC.edgeMk) > 0 && !any(==(12), mC.edgeMk))
+    check("triangle step: the step edges keep the markers 5 and 6 with obstacles", count(==(5), mC.edgeMk) > 0 && count(==(6), mC.edgeMk) > 0)
+    check("triangle step: the area is the box area minus the step, the rectangle and the circle polygon",
+          area_of(mC) < 12.0 - 1.3 * 0.9 - 0.6 * 0.4 && area_of(mC) > 12.0 - 1.3 * 0.9 - 0.6 * 0.4 - pi * 0.25^2)
+    check("triangle step: the floor and the face lengths stay exact with obstacles", abs(length_of(mC, 5) - 1.3) < 1e-12 && abs(length_of(mC, 6) - 0.9) < 1e-12)
+    check("triangle step: the rectangle obstacle has the exact perimeter", abs(length_of(mC, 10) - 2.0 * (0.6 + 0.4)) < 1e-12)
+end
+
 # ── Names ────────────────────────────────────────────────────────────────
 
 println("Duplicate names")
@@ -2084,6 +2204,7 @@ if haveIO
         ("h_triangle_circle", "mesh_type: triangle\nbox_length: [1.0, 1.0]\nperiodic: [true, true]\nmesh_options:\n  mesh_size: 0.25\nobstacles:\n  - shape: circle\n    center: [0.5, 0.5]\n    radius: 0.15\nhierarchy:\n  levels: 3\n"),
         ("h_triangle_rect", "mesh_type: triangle\nbox_length: [2.0, 1.0]\nmesh_options:\n  mesh_size: 0.3\nobstacles:\n  - shape: rectangle\n    center: [0.7, 0.5]\n    half_extents: [0.2, 0.15]\n  - shape: circle\n    center: [1.4, 0.5]\n    radius: 0.2\nhierarchy:\n  levels: 3\n"),
         ("h_gridsplit_step", "mesh_type: gridsplit\nbox_length: [4.0, 2.0]\nn_divisions: [8, 4]\ndiagonal: alternate\nstep:\n  length: 1.0\n  height: 1.0\nhierarchy:\n  levels: 3\n"),
+        ("h_triangle_step", "mesh_type: triangle\nbox_length: [4.0, 2.0]\nstep:\n  length: 1.0\n  height: 1.0\nmesh_options:\n  mesh_size: 0.4\n  mesh_size_obstacle: 0.25\nobstacles:\n  - shape: circle\n    center: [2.5, 1.0]\n    radius: 0.3\nhierarchy:\n  levels: 3\n"),
     ]
     hierLevels = Dict{String,Any}()
     for (name, yamlText) in hierCases2
@@ -2249,13 +2370,13 @@ if haveIO
         script = joinpath(dirname(writerPath), "tools", "hierarchy_multigrid_check.jl")
         if isfile(script) && writerPath == abspath(joinpath(@__DIR__, "writer.jl"))
             outFile = joinpath(hierDir, "mg_check.out")
-            proc = run(pipeline(ignorestatus(`$(Base.julia_cmd()) --project=$(dirname(writerPath)) $script kuhn_box gridsplit_stretched gridsplit_step kuhn_step kuhn_periodic triangle_periodic kuhn_fully_periodic`);
+            proc = run(pipeline(ignorestatus(`$(Base.julia_cmd()) --project=$(dirname(writerPath)) $script kuhn_box gridsplit_stretched gridsplit_step kuhn_step triangle_step kuhn_periodic triangle_periodic kuhn_fully_periodic`);
                                 stdout = outFile, stderr = devnull))
             text = read(outFile, String)
             check("multigrid check: the script exits with code 0", proc.exitcode == 0)
             check("multigrid check: the script reports that all checks passed", occursin("All checks passed.", text))
-            check("multigrid check: the script ran all 7 hierarchies",
-                  all(n -> occursin("== $n:", text), ("kuhn_box", "gridsplit_stretched", "gridsplit_step", "kuhn_step", "kuhn_periodic", "triangle_periodic", "kuhn_fully_periodic")))
+            check("multigrid check: the script ran all 8 hierarchies",
+                  all(n -> occursin("== $n:", text), ("kuhn_box", "gridsplit_stretched", "gridsplit_step", "kuhn_step", "triangle_step", "kuhn_periodic", "triangle_periodic", "kuhn_fully_periodic")))
             check("multigrid check: the periodic hierarchies were checked for periodic images", count("periodic images", text) >= 3)
         end
     end
