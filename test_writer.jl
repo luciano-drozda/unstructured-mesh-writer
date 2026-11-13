@@ -2537,6 +2537,26 @@ if haveIO
         end
     end
 
+    # The stored folder gallery_step/ holds one config and one PNG for each
+    # mesh type. Every config must load and must have the key step.
+    let
+        stepGallery = joinpath(dirname(writerPath), "gallery_step")
+        if isdir(stepGallery)
+            names = sort([splitext(f)[1] for f in readdir(stepGallery) if endswith(f, ".yaml")])
+            check("gallery_step: the folder holds one config for each of the 4 mesh types",
+                  names == ["step_gridsplit", "step_kuhn", "step_tetra", "step_triangle"])
+            for n in names
+                cfg = try
+                    W.load_config(joinpath(stepGallery, "$n.yaml"))
+                catch
+                    nothing
+                end
+                check("gallery_step: $n loads and has the key step", cfg !== nothing && cfg["step"] !== nothing)
+                check("gallery_step: $n has a PNG", isfile(joinpath(stepGallery, "$n.png")))
+            end
+        end
+    end
+
     # The script tools/hierarchy_multigrid_check.jl reads the written files
     # like a solver. It checks the prolongation, the Galerkin product and a
     # V-cycle. The test runs it on 2-D and 3-D hierarchies, with and without

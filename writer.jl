@@ -57,6 +57,8 @@ and height (h). The step is the block [0, xs] x [0, h] of the box. In 3-D
 the block spans the full width. The flow goes along +x. The inlet is the
 side x = 0 above the step. A step needs periodic false along x and y. The
 z direction can be periodic. The grid types need xs and h on grid lines.
+The type tetra moves xs and h to a lattice point. The change is below
+1e-10 of the box length, and the file keeps the moved values.
 The step adds two boundary markers, which continue the box sides. The
 step floor (y = h, x <= xs) has the marker 5 in 2-D and 7 in 3-D. The
 step face (x = xs, y <= h) has the marker 6 in 2-D and 8 in 3-D. The

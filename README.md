@@ -39,7 +39,8 @@ Quality attributes (floats, angles in degrees; both writers compute them the sam
 | 2-D | `min_angle_deg`, `max_angle_deg`: the smallest and the largest interior angle of the triangles |
 | 3-D | `min_dihedral_deg`, `max_dihedral_deg`: the smallest and the largest dihedral angle of the tetrahedra; `max_radius_edge_ratio`: the largest ratio of circumradius to shortest edge (0.612 for a regular tetrahedron) |
 
-Adding attributes does not change `schema_version`.
+A mesh with a backward-facing step also has the group `domain`. It has the attributes `kind` (`backward_facing_step`), `step_length` and `step_height`. A mesh without a step has no such group.
+Adding attributes or groups does not change `schema_version`.
 
 ### Sliver removal in `writer.jl` (`tetra` only)
 
@@ -81,7 +82,7 @@ meas = zeros(size(m.cells, 1))
 signed_measure_3d_kernel(m.cells, m.pts, size(m.cells, 1), meas)
 ```
 
-The other fields are `edges`, `cellVol`, `cvn`, `vertexVol`, `v2cOff` and `v2cIdx`, `ptMk`, `edgeMk` (2-D only), `periodic`, `perPairs`, `allPairs`, `obstacles`, `quality`, `dim`, `meshType`, `boxLength` and `schemaVersion`.
+The other fields are `edges`, `cellVol`, `cvn`, `vertexVol`, `v2cOff` and `v2cIdx`, `ptMk`, `edgeMk` (2-D only), `periodic`, `perPairs`, `allPairs`, `obstacles`, `step` (the NamedTuple `(length, height)`, or `nothing`), `quality`, `dim`, `meshType`, `boxLength` and `schemaVersion`.
 The cells of vertex `v` are `v2cIdx[v2cOff[v]:v2cOff[v+1]-1]`. The function stops with an error when `schema_version` is not 1.
 
 ## Mesh hierarchies (`writer.jl`)
@@ -181,9 +182,9 @@ The script `tools/hierarchy_multigrid_check.jl` reads the level files with `load
 2. On a periodic mesh, a periodic function of level `k` is still periodic after `P`. The two images of a fine vertex get the same value. The script takes the periodic images from `all_pairs` and makes them one unknown.
 3. The Galerkin product `P' * A_fine * P` equals the stiffness matrix `A_coarse` of the Laplace operator that the script assembles on the coarse mesh. This is true only when the coarse space lies inside the fine space, so one number tests the nesting, the vertex order and the cell order.
 4. A fine vertex on the boundary has no free coarse vertex as parent, so the zero values on the boundary nest.
-5. A V(2,2)-cycle with Gauss-Seidel smoothing and a direct solve on level 0 solves a Poisson problem with zero values on the obstacles and on the box sides without periodicity. A mesh that is periodic in every direction and has no obstacle gets a lumped mass term, because the Laplace matrix alone is singular.
+5. A V(2,2)-cycle with Gauss-Seidel smoothing and a direct solve on level 0 solves a Poisson problem with zero values on the obstacles, on the step and on the box sides without periodicity. A mesh that is periodic in every direction and has no obstacle gets a lumped mass term, because the Laplace matrix alone is singular.
 
-Measured here (`julia --project=. tools/hierarchy_multigrid_check.jl`): on all 9 test hierarchies (2-D and 3-D, with and without periodic directions) the errors of checks 1 and 3 are between 1e-16 and 6e-15 on all levels, the jump between periodic images is 0, and no fine boundary vertex has a free coarse parent.
+Measured here (`julia --project=. tools/hierarchy_multigrid_check.jl`): on all 14 test hierarchies (2-D and 3-D, with and without periodic directions, with and without a step) the errors of checks 1 and 3 are between 1e-16 and 6e-15 on all levels, the jump between periodic images is 0, and no fine boundary vertex has a free coarse parent.
 The convergence factor of the V-cycle, for a hierarchy with level 0 and 1 to 4 finer levels:
 
 | Hierarchy | Factor, 1 finer level | 2 | 3 | 4 |
@@ -195,11 +196,16 @@ The convergence factor of the V-cycle, for a hierarchy with level 0 and 1 to 4 f
 | `kuhn` box | 0.06 | 0.16 | 0.21 | |
 | `kuhn` box, periodic in x and z | 0.10 | 0.13 | 0.17 | |
 | `kuhn` box, periodic in all directions | 0.10 | 0.13 | 0.18 | |
+| `gridsplit` with a step | 0.10 | 0.14 | 0.16 | |
+| `kuhn` with a step, periodic in z | 0.16 | 0.22 | | |
+| `triangle` with a step and a circle | 0.08 | 0.12 | 0.15 | |
+| `tetra` with a step (`max_dihedral: 150`) | 0.13 | 0.24 | | |
+| `tetra` with a step, periodic in z (`max_dihedral: 150`) | 0.16 | 0.27 | | |
 | `tetra` with a sphere (`max_dihedral: 150`) | 0.34 | 0.44 | 0.54 | |
 | `tetra` with a sphere and a box, periodic in y and z (`max_dihedral: 150`) | 0.44 | 0.60 | | |
 
 The factor grows a little with the number of levels, and it grows most on the `tetra` meshes. The cause is the smoother and the quality of the coarse mesh, not the hierarchy: checks 1 to 4 show that the nesting and the periodicity are exact.
-A stronger smoother or a better coarse mesh lowers the factor. A hierarchy with a wrong vertex order gives a failure in check 1 and check 3. The script ends with a code 1 when a check fails or when a factor is 0.7 or more. The test suite runs the script on 5 of the hierarchies.
+A stronger smoother or a better coarse mesh lowers the factor. A hierarchy with a wrong vertex order gives a failure in check 1 and check 3. The script ends with a code 1 when a check fails or when a factor is 0.7 or more. The test suite runs the script on 10 of the hierarchies.
 
 ### Choosing the coarsest mesh
 
@@ -226,6 +232,78 @@ The folder `gallery_hierarchy/` holds 4 configs and one image for each level.
 | ![hier_gridsplit_stretched_L0](gallery_hierarchy/hier_gridsplit_stretched_L0.png)<br><b>hier_gridsplit_stretched, level 0</b> | ![hier_gridsplit_stretched_L1](gallery_hierarchy/hier_gridsplit_stretched_L1.png)<br><b>level 1</b> | ![hier_gridsplit_stretched_L2](gallery_hierarchy/hier_gridsplit_stretched_L2.png)<br><b>level 2</b> |
 
 `hier_gridsplit_stretched` has 4 levels. Its level 3 image is `hier_gridsplit_stretched_L3.png`.
+
+## Backward-facing step (`writer.jl`)
+
+The key `step` removes a block from the lower-left corner of the box. The rest is the domain of a backward-facing step. The flow goes along +x. The inlet is the side x = 0 above the step. The outlet is the side x = Lx.
+
+```yaml
+mesh_type: triangle
+box_length: [6.0, 2.0]
+step:
+  length: 1.3    # xs, the step block is [0, xs] x [0, h]
+  height: 0.9    # h
+mesh_options:
+  mesh_size: 0.3
+  mesh_size_obstacle: 0.1   # also the target size on the step walls
+```
+
+### Rules
+
+- The mesh types `gridsplit`, `kuhn`, `triangle` and `tetra` accept the key. `equilateral` gives an error, because its rows are offset.
+- The values must satisfy 0 < `length` < the first entry of `box_length` and 0 < `height` < the second entry.
+- A step needs `periodic` false along x and y, because the inlet and the outlet have different heights. In 3-D, z can be periodic. The block spans the full width along z.
+- `gridsplit` and `kuhn` need `length` and `height` on grid lines. A value off the grid gives an error that names the value, the axis and the two nearest grid lines. The writer never moves the step. On a stretched grid, use the grid values.
+- `triangle` and `tetra` accept any value. `tetra` moves the step corner to a lattice point. The change is smaller than 1e-10 of the box length, and the file keeps the moved value.
+- An obstacle that overlaps or touches the step gives an error. A gap below `mesh_size_obstacle` gives a warning.
+
+### Markers
+
+| Boundary part | 2-D | 3-D |
+|---|---|---|
+| Bottom (y = 0, downstream of the step) | 1 | 3 |
+| Outlet (x = Lx) | 2 | 2 |
+| Top (y = Ly) | 3 | 4 |
+| Inlet (x = 0, above the step) | 4 | 1 |
+| z = 0 and z = Lz | | 5 and 6 |
+| Step floor (y = h, x <= xs) | 5 | 7 |
+| Step face (x = xs, y <= h) | 6 | 8 |
+| Obstacle number i, counted from 0 | 10 + i | 100 + i |
+
+The lowest marker wins at a shared vertex. This has three results:
+
+1. The reentrant corner (xs, h) has the floor marker.
+2. The vertex (0, h) has the inlet marker, and the vertex (xs, 0) has the bottom marker.
+3. In 3-D with periodic z, a floor or face vertex on the plane z = 0 or z = Lz keeps the marker 5 or 6. This is the rule of every periodic mesh. A solver that needs the wall vertices there can test the coordinates with `step.length` and `step.height`.
+
+The group `domain` of the file has the attributes `kind` (`backward_facing_step`), `step_length` and `step_height`. The values are the exact ones that the mesh uses. `load_mesh` returns them in the field `step`.
+
+### Counts of the grid types
+
+A `gridsplit` mesh with `nx` by `ny` divisions and a step of `ix` by `jy` cells has:
+
+- (nx + 1)(ny + 1) - ix jy vertices and 2 (nx ny - ix jy) triangles
+- ix edges with the marker 5, jy edges with the marker 6, ny - jy edges with the marker 4
+
+A `kuhn` mesh with `nx`, `ny` and `nz` divisions has (nx + 1)(ny + 1)(nz + 1) - ix jy (nz + 1) vertices and 6 nz (nx ny - ix jy) tetrahedra.
+
+### Hierarchies
+
+A hierarchy works with a step on all four mesh types. The refinement copies the markers. Level 0 equals the mesh without the key `hierarchy`. The table in the section on the multigrid check has the measured V-cycle factors. The factors are between 0.08 and 0.27.
+
+### Quality
+
+- `triangle`: the smallest angle meets `min_angle` (20 degrees by default). The test meshes have 25 to 31 degrees.
+- `tetra`: the flips work as in a box. A sweep over 14 random steps, with and without periodic z, gave no failure. With the default `min_dihedral` of 10, 11 of the 14 meshes keep the smallest dihedral angle above 10 degrees. The other 3 have 4.9 to 8.6 degrees. The largest angle was between 157 and 172 degrees. `max_dihedral: 150` lowers it.
+
+### Gallery of steps
+
+The folder `gallery_step/` holds one config and one image for each mesh type. The `triangle` mesh has a circle downstream of the step.
+
+| | |
+|---|---|
+| ![step_gridsplit](gallery_step/step_gridsplit.png)<br><b>step_gridsplit</b> | ![step_triangle](gallery_step/step_triangle.png)<br><b>step_triangle</b> |
+| ![step_kuhn](gallery_step/step_kuhn.png)<br><b>step_kuhn</b> | ![step_tetra](gallery_step/step_tetra.png)<br><b>step_tetra</b> |
 
 ## Known limitations of `writer.py`
 
@@ -265,7 +343,7 @@ In a clean Julia folder this took about 3 minutes. It needs a network. Without `
 
 `julia --project=. test_writer.jl [writer.jl]` runs the unit, config, end-to-end and gallery tests of `writer.jl`.
 With `WRITER_REF_DIR=<folder>` it also compares the output with stored reference outputs bit by bit.
-Make such a folder with `tools/run_writer_on_configs.sh writer.jl <folder>`. It holds 72 outputs: 47 plain meshes and 25 hierarchy levels. See `tools/README.md` for the other tools.
+Make such a folder with `tools/run_writer_on_configs.sh writer.jl <folder>`. It holds 82 outputs: 51 plain meshes and 31 hierarchy levels. See `tools/README.md` for the other tools.
 
 ## Gallery
 

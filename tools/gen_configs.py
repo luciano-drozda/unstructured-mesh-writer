@@ -55,3 +55,13 @@ w("hierarchy", "hier_kuhn_per", f"mesh_type: kuhn\nbox_length: [1.0, 1.0, 1.0]\n
 w("hierarchy", "hier_kuhn_alt_stretch", f"mesh_type: kuhn\nbox_length: [1.0, 1.0, 1.0]\nn_divisions: [2, 3, 2]\ndiagonal: alternate_layers\nstretching_ratio: [1.3, 1.0, 1.5]\nstretching_symmetric: [false, false, true]\n{hh}")
 w("hierarchy", "hier_tet_none", f"mesh_type: tetra\nbox_length: [1.0, 1.0, 1.0]\nmesh_options:\n  mesh_size: 0.5\n{hh}")
 w("hierarchy", "hier_tet_several", f"mesh_type: tetra\nbox_length: [2.0, 1.0, 1.0]\nperiodic: [false, true, true]\nobstacles:\n{sph}{bx}mesh_options:\n  mesh_size: 0.5\n  mesh_size_obstacle: 0.3\n{hh}")
+# backward-facing step: one config for each mesh type. The kuhn and tetra types also run with a periodic span.
+# The structured types need the step corner on a grid line. The configs step_kuhn_perz and step_tri have a hierarchy.
+st = "step:\n  length: 1.0\n  height: 1.0\n"
+w("step", "step_gs", f"mesh_type: gridsplit\nbox_length: [4.0, 2.0]\nn_divisions: [16, 8]\ndiagonal: alternate\n{st}")
+w("step", "step_kuhn", f"mesh_type: kuhn\nbox_length: [4.0, 2.0, 1.0]\nn_divisions: [8, 4, 2]\ndiagonal: alternate_layers\n{st}")
+w("step", "step_kuhn_perz", f"mesh_type: kuhn\nbox_length: [4.0, 2.0, 1.0]\nn_divisions: [8, 4, 2]\ndiagonal: alternate_layers\nperiodic: [false, false, true]\n{st}hierarchy:\n  levels: 3\n")
+w("step", "step_tri", "mesh_type: triangle\nbox_length: [6.0, 2.0]\nstep:\n  length: 1.3\n  height: 0.9\nobstacles:\n  - shape: circle\n    center: [3.5, 1.4]\n    radius: 0.25\nmesh_options:\n  mesh_size: 0.3\n  mesh_size_obstacle: 0.1\nhierarchy:\n  levels: 3\n")
+tstep = "step:\n  length: 0.8\n  height: 0.5\n"
+w("step", "step_tet", f"mesh_type: tetra\nbox_length: [3.0, 1.0, 0.6]\n{tstep}mesh_options:\n  mesh_size: 0.3\n")
+w("step", "step_tet_perz", f"mesh_type: tetra\nbox_length: [3.0, 1.0, 0.6]\nperiodic: [false, false, true]\n{tstep}mesh_options:\n  mesh_size: 0.3\n")
