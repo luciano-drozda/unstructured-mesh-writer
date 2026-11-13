@@ -1174,14 +1174,14 @@ function segment_split_point_2d_kernel(segV, segCurve, vx, vy, obsCx, obsCy, obs
 end
 
 # point_markers_2d_domain_kernel(pts, n, Lx, Ly, tol, obsKind, obsCx,
-#                                obsCy, obsHx, obsHy, nObs, ptMk)
+#                                obsCy, obsHx, obsHy, nObs, stepL, stepH, ptMk)
 #
 # Set the marker of each vertex from its coordinates. The markers are
-# 1 bottom, 2 right, 3 top, 4 left, and 10 + i for obstacle number i,
-# counted from 0. An interior vertex gets 0. Each write replaces the
-# earlier one, and the writes go from the highest marker to the lowest.
-# The lowest marker wins at a shared vertex, and a box side wins over
-# an obstacle.
+# 1 bottom, 2 right, 3 top, 4 left, 5 step floor and 6 step face.
+# Obstacle number i, counted from 0, has the marker 10 + i. An interior
+# vertex gets 0. Each write replaces the earlier one, and the writes go from
+# the highest marker to the lowest. The lowest marker wins at a shared
+# vertex. A step wins over an obstacle, and a box side wins over a step.
 #
 # pts: vertex array with x in column 1 and y in column 2
 # n: number of vertices
@@ -1194,8 +1194,10 @@ end
 # obsHx: radius of a circle, or half the x extent of a rectangle
 # obsHy: radius of a circle, or half the y extent of a rectangle
 # nObs: number of obstacles
+# stepL: length of the step block along x, or 0 for a domain without step
+# stepH: height of the step block along y
 # ptMk: length-n output array
-function point_markers_2d_domain_kernel(pts, n, Lx, Ly, tol, obsKind, obsCx, obsCy, obsHx, obsHy, nObs, ptMk)
+function point_markers_2d_domain_kernel(pts, n, Lx, Ly, tol, obsKind, obsCx, obsCy, obsHx, obsHy, nObs, stepL, stepH, ptMk)
     for v = 1:n
         x = pts[v, 1]
         y = pts[v, 2]
@@ -1212,6 +1214,15 @@ function point_markers_2d_domain_kernel(pts, n, Lx, Ly, tol, obsKind, obsCx, obs
             end
             if val < tol
                 mk = 9 + i
+            end
+        end
+        # The step after the obstacles. The face (6) goes before the floor (5).
+        if stepL > 0.0
+            if abs(x - stepL) < tol && y < stepH + tol
+                mk = 6
+            end
+            if abs(y - stepH) < tol && x < stepL + tol
+                mk = 5
             end
         end
         # Box sides last. Marker 1 is the last write, so it wins.
@@ -1233,7 +1244,8 @@ function point_markers_2d_domain_kernel(pts, n, Lx, Ly, tol, obsKind, obsCx, obs
 end
 
 # edge_markers_2d_domain_kernel(pts, edges, isBnd, nEdges, Lx, Ly, tol,
-#                               obsKind, obsCx, obsCy, obsHx, obsHy, nObs, edgeMk)
+#                               obsKind, obsCx, obsCy, obsHx, obsHy, nObs,
+#                               stepL, stepH, edgeMk)
 #
 # Set the marker of each boundary edge. An edge gets the marker of an
 # entity when both of its end vertices lie on that entity. The order of
@@ -1253,8 +1265,10 @@ end
 # obsHx: radius of a circle, or half the x extent of a rectangle
 # obsHy: radius of a circle, or half the y extent of a rectangle
 # nObs: number of obstacles
+# stepL: length of the step block along x, or 0 for a domain without step
+# stepH: height of the step block along y
 # edgeMk: length-nEdges output array
-function edge_markers_2d_domain_kernel(pts, edges, isBnd, nEdges, Lx, Ly, tol, obsKind, obsCx, obsCy, obsHx, obsHy, nObs, edgeMk)
+function edge_markers_2d_domain_kernel(pts, edges, isBnd, nEdges, Lx, Ly, tol, obsKind, obsCx, obsCy, obsHx, obsHy, nObs, stepL, stepH, edgeMk)
     for e = 1:nEdges
         u = edges[e, 1]
         w = edges[e, 2]
@@ -1280,6 +1294,15 @@ function edge_markers_2d_domain_kernel(pts, edges, isBnd, nEdges, Lx, Ly, tol, o
                 # Both end vertices must lie on the obstacle.
                 if max(valU, valW) < tol
                     mk = 9 + i
+                end
+            end
+            # The step after the obstacles. Both end vertices must lie on it.
+            if stepL > 0.0
+                if max(abs(xu - stepL), abs(xw - stepL)) < tol && max(yu, yw) < stepH + tol
+                    mk = 6
+                end
+                if max(abs(yu - stepH), abs(yw - stepH)) < tol && max(xu, xw) < stepL + tol
+                    mk = 5
                 end
             end
             if max(abs(xu), abs(xw)) < tol
@@ -3599,7 +3622,7 @@ function _triangulate_domain2(logBuf::IOBuffer, Lx::Float64, Ly::Float64, perX::
     end
     tol = 1.0e-9 * max(Lx, Ly)
     ptMk = zeros(Int32, nPts)
-    point_markers_2d_domain_kernel(pts, nPts, Lx, Ly, tol, obsKind, obsCx, obsCy, obsHx, obsHy, nObs, ptMk)
+    point_markers_2d_domain_kernel(pts, nPts, Lx, Ly, tol, obsKind, obsCx, obsCy, obsHx, obsHy, nObs, 0.0, 0.0, ptMk)
 
     # ---- Smooth the interior vertices with Jacobi sweeps. A sweep stays
     # only when no cell flips and the worst radius-edge ratio does not grow.
@@ -3639,7 +3662,7 @@ function _triangulate_domain2(logBuf::IOBuffer, Lx::Float64, Ly::Float64, perX::
 
     # ---- Edge markers.
     edgeMk = zeros(Int32, nEdges)
-    edge_markers_2d_domain_kernel(pts, edges, isBnd, nEdges, Lx, Ly, tol, obsKind, obsCx, obsCy, obsHx, obsHy, nObs, edgeMk)
+    edge_markers_2d_domain_kernel(pts, edges, isBnd, nEdges, Lx, Ly, tol, obsKind, obsCx, obsCy, obsHx, obsHy, nObs, 0.0, 0.0, edgeMk)
 
     info = (nVertices = nPts, nCells = nCells, nEdges = nEdges, maxRatio = worst,
             minAngleDeg = asind(1.0 / (2.0 * worst)), sweepsDone = sweepsDone)
@@ -6059,6 +6082,83 @@ function _check_cell_orientation(logBuf::IOBuffer, signedMeasure::Vector{Float64
     end
 end
 
+# ── Step domain helpers ──────────────────────────────────────────────────
+
+# Return the number of grid cells that lie before the grid line at value.
+# The grid lines are the entries of pos. Stop with an error when no grid
+# line lies within tol of value. The error names the two nearest lines.
+function _step_index(pos::Vector{Float64}, value::Float64, tol::Float64, what::AbstractString, axisName::AbstractString)
+    n = length(pos)
+    for k in 1:n
+        abs(pos[k] - value) < tol && return k - 1
+    end
+    below = pos[1]
+    above = pos[n]
+    for k in 1:n
+        pos[k] < value && (below = pos[k])
+    end
+    for k in n:-1:1
+        pos[k] > value && (above = pos[k])
+    end
+    error("step $what $value is not on a grid line along $axisName. The nearest grid lines are $below and $above.")
+end
+
+# Keep the cells that have keep[c] == 1. Renumber the vertices that these
+# cells use and keep their order. Return the new vertex array and the new
+# cell array.
+function _compact_by_cells(pts::Matrix{Float64}, cells::Matrix{Int}, keep::Vector{Int})
+    nCells = size(cells, 1)
+    nc = size(cells, 2)
+    used = zeros(Int, size(pts, 1))
+    nKeep = 0
+    for c in 1:nCells
+        keep[c] == 1 || continue
+        nKeep += 1
+        for k in 1:nc
+            used[cells[c, k]] = 1
+        end
+    end
+    newIdx = zeros(Int, size(pts, 1))
+    nPts = 0
+    for v in 1:size(pts, 1)
+        if used[v] == 1
+            nPts += 1
+            newIdx[v] = nPts
+        end
+    end
+    newPts = zeros(Float64, nPts, size(pts, 2))
+    for v in 1:size(pts, 1)
+        used[v] == 1 || continue
+        for d in 1:size(pts, 2)
+            newPts[newIdx[v], d] = pts[v, d]
+        end
+    end
+    newCells = zeros(Int, nKeep, nc)
+    r = 0
+    for c in 1:nCells
+        keep[c] == 1 || continue
+        r += 1
+        for k in 1:nc
+            newCells[r, k] = newIdx[cells[c, k]]
+        end
+    end
+    return newPts, newCells
+end
+
+# Return the isBnd array of an edge registry. An edge that only one cell
+# uses is a boundary edge. The array holds 1 for such an edge, else 0.
+function _boundary_edge_flags(c2e::Matrix{Int}, nEdges::Int)
+    edgeCount = zeros(Int, nEdges)
+    for c in 1:size(c2e, 1), k in 1:size(c2e, 2)
+        edgeCount[c2e[c, k] + 1] += 1
+    end
+    isBnd = zeros(Int, nEdges)
+    for e in 1:nEdges
+        edgeCount[e] == 1 && (isBnd[e] = 1)
+    end
+    return isBnd
+end
+
 # ── Builders ─────────────────────────────────────────────────────────────
 #
 # A builder takes the checked config. It returns one NamedTuple, made by
@@ -6110,11 +6210,50 @@ function _build_gridsplit(logBuf::IOBuffer, cfg::Dict)
     signed_measure_2d_kernel(cells0, pts, nCells, meas)
     _check_cell_orientation(logBuf, meas, "gridsplit")
 
+    if cfg["step"] !== nothing
+        return _gridsplit_step(pts, cells0, px, py, cfg)
+    end
+
     ptMk = zeros(Int32, nPts)
     point_markers_grid_2d_kernel(nx, ny, ptMk)
 
     return _builder_result(pts, cells0, ptMk, nothing, nothing, nothing, NamedTuple[],
                            cfg["box_length"], nothing, :grid, (nx, ny))
+end
+
+# Cut the step block out of a full gridsplit mesh. The step corner must lie
+# on a grid line. The markers come from the coordinates.
+function _gridsplit_step(pts::Matrix{Float64}, cells0::Matrix{Int}, px::Vector{Float64}, py::Vector{Float64}, cfg::Dict)
+    Lx, Ly = cfg["box_length"]
+    nx = length(px) - 1
+    tol = 1.0e-9 * max(Lx, Ly)
+    ix = _step_index(px, cfg["step"].length, tol, "length", "x")
+    jy = _step_index(py, cfg["step"].height, tol, "height", "y")
+    # Rectangle r (0-based) has the two rows 2r+1 and 2r+2.
+    nCells0 = size(cells0, 1)
+    keep = ones(Int, nCells0)
+    for c in 1:nCells0
+        r = div(c - 1, 2)
+        (mod(r, nx) < ix && div(r, nx) < jy) && (keep[c] = 0)
+    end
+    pts2, cells = _compact_by_cells(pts, cells0, keep)
+    nPts = size(pts2, 1)
+    nCells = size(cells, 1)
+
+    edges, c2e = _build_edge_registry(cells, 2)
+    nEdges = size(edges, 1)
+    isBnd = _boundary_edge_flags(c2e, nEdges)
+    stepL = px[ix + 1]
+    stepH = py[jy + 1]
+    noKind = zeros(Int, 0)
+    noVal = zeros(Float64, 0)
+    ptMk = zeros(Int32, nPts)
+    point_markers_2d_domain_kernel(pts2, nPts, Lx, Ly, tol, noKind, noVal, noVal, noVal, noVal, 0, stepL, stepH, ptMk)
+    edgeMk = zeros(Int32, nEdges)
+    edge_markers_2d_domain_kernel(pts2, edges, isBnd, nEdges, Lx, Ly, tol, noKind, noVal, noVal, noVal, noVal, 0, stepL, stepH, edgeMk)
+
+    return _builder_result(pts2, cells, ptMk, edgeMk, edges, c2e, NamedTuple[],
+                           cfg["box_length"], nothing, :given, (), (length = stepL, height = stepH))
 end
 
 function _build_equilateral(logBuf::IOBuffer, cfg::Dict)
@@ -6163,9 +6302,9 @@ function _build_equilateral(logBuf::IOBuffer, cfg::Dict)
     noKind = zeros(Int, 0)
     noVal = zeros(Float64, 0)
     ptMk = zeros(Int32, nPts)
-    point_markers_2d_domain_kernel(pts, nPts, Lx, Ly, tol, noKind, noVal, noVal, noVal, noVal, 0, ptMk)
+    point_markers_2d_domain_kernel(pts, nPts, Lx, Ly, tol, noKind, noVal, noVal, noVal, noVal, 0, 0.0, 0.0, ptMk)
     edgeMk = zeros(Int32, nEdges)
-    edge_markers_2d_domain_kernel(pts, edges, isBnd, nEdges, Lx, Ly, tol, noKind, noVal, noVal, noVal, noVal, 0, edgeMk)
+    edge_markers_2d_domain_kernel(pts, edges, isBnd, nEdges, Lx, Ly, tol, noKind, noVal, noVal, noVal, noVal, 0, 0.0, 0.0, edgeMk)
 
     return _builder_result(pts, cells0, ptMk, edgeMk, edges, c2e, NamedTuple[],
                            cfg["box_length"], nothing, :given, ())
@@ -6580,7 +6719,7 @@ end
 
 # Return the mesh types that accept the key step.
 function _step_types()
-    return ()
+    return ("gridsplit",)
 end
 
 # Check the config value of the key step. Return nothing when the key is

@@ -268,15 +268,16 @@ function vertex_classes(m)
 end
 
 # Find the classes with a zero value (Dirichlet). A class has one when a
-# vertex lies on an obstacle (marker 10 or more) or on a box side with no
-# periodicity. Return a vector of Bool, one entry for each class. All
-# entries are false when the mesh is periodic in every direction and has
-# no obstacle.
+# vertex lies on a box side with no periodicity. It also has one when
+# the vertex lies on an obstacle or on a step. These vertices have a
+# marker above 2 times the dimension. Return a vector of Bool, one
+# entry for each class. All entries are false when the mesh is periodic
+# in every direction and has no obstacle or step.
 function dirichlet_classes(m, cls, nCls)
     isD = fill(false, nCls)
     tol = 1e-9 * maximum(m.boxLength)
     for v in 1:size(m.pts, 1)
-        hit = m.ptMk[v] >= 10
+        hit = m.ptMk[v] > 2 * m.dim
         for d in 1:m.dim
             m.periodic[d] && continue
             hit = hit || abs(m.pts[v, d]) < tol || abs(m.pts[v, d] - m.boxLength[d]) < tol
@@ -412,6 +413,17 @@ mesh_options:
   mesh_size_obstacle: 0.2
 hierarchy:
   levels: 5
+"""),
+    ("gridsplit_step", """
+mesh_type: gridsplit
+box_length: [4.0, 2.0]
+n_divisions: [8, 4]
+diagonal: slash
+step:
+  length: 1.0
+  height: 1.0
+hierarchy:
+  levels: 4
 """),
     ("gridsplit_stretched", """
 mesh_type: gridsplit

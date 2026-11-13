@@ -1286,6 +1286,93 @@ let
     check("step face marker: a face on y = h downstream of the step gets none", fm(pts, mk, box, 13, 14, 15, step) == 0)
 end
 
+# ── Step: gridsplit ──────────────────────────────────────────────────────
+
+println("Step: gridsplit")
+# The marker kernels with a step.
+let
+    pts = [0.0 1.0; 0.5 1.0; 1.0 1.0; 1.0 0.5; 1.0 0.0; 2.0 0.0; 2.0 1.0; 2.0 2.0; 0.0 2.0; 0.5 0.5; 1.5 1.5]
+    noKind = zeros(Int, 0); noVal = zeros(Float64, 0)
+    mk = zeros(Int32, size(pts, 1))
+    WCore.point_markers_2d_domain_kernel(pts, size(pts, 1), 2.0, 2.0, 1e-9, noKind, noVal, noVal, noVal, noVal, 0, 1.0, 1.0, mk)
+    # (0,1) left wins over the floor. (1,1) is the reentrant corner and has the floor marker.
+    # (1,0) is on the bottom. (2,0) is the bottom right corner. (0,2) is on the top.
+    check("step markers 2-D: the point rule", Int.(mk) == [4, 5, 5, 6, 1, 1, 2, 2, 3, 0, 0])
+    mk0 = zeros(Int32, size(pts, 1))
+    WCore.point_markers_2d_domain_kernel(pts, size(pts, 1), 2.0, 2.0, 1e-9, noKind, noVal, noVal, noVal, noVal, 0, 0.0, 0.0, mk0)
+    check("step markers 2-D: a length of 0 switches the step off", mk0[2] == 0 && mk0[4] == 0 && mk0[1] == 4)
+    edges = [1 2; 2 3; 3 4; 4 5; 1 9; 5 6; 6 7; 10 11]
+    isBnd = ones(Int, size(edges, 1))
+    ek = zeros(Int32, size(edges, 1))
+    WCore.edge_markers_2d_domain_kernel(pts, edges, isBnd, size(edges, 1), 2.0, 2.0, 1e-9, noKind, noVal, noVal, noVal, noVal, 0, 1.0, 1.0, ek)
+    check("step markers 2-D: the edge rule", Int.(ek) == [5, 5, 6, 6, 4, 1, 2, 0])
+end
+# Grid-line lookup and renumbering.
+let
+    pos = [0.0, 0.5, 1.0, 2.0, 4.0]
+    check("_step_index: a value on a grid line gives the number of cells before it", WCore._step_index(pos, 1.0, 1e-9, "length", "x") == 2)
+    msg = errmsg(() -> WCore._step_index(pos, 1.5, 1e-9, "length", "x"))
+    check("_step_index: an off-grid value names the nearest grid lines",
+          msg !== nothing && occursin("step length 1.5 is not on a grid line along x", msg) && occursin("nearest grid lines are 1.0 and 2.0", msg))
+    pts = [0.0 0.0; 1.0 0.0; 1.0 1.0; 0.0 1.0; 2.0 0.0; 2.0 1.0]
+    cells = [1 2 3; 1 3 4; 2 5 6; 2 6 3]
+    newPts, newCells = WCore._compact_by_cells(pts, cells, [0, 0, 1, 1])
+    check("_compact_by_cells: the unused vertices go and the order stays", newPts == [1.0 0.0; 1.0 1.0; 2.0 0.0; 2.0 1.0] && newCells == [1 3 4; 1 4 2])
+end
+# The mesh. Every diagonal mode, a stretched grid, and a step at the border of the grid.
+let
+    function volume2(pts, cells)
+        v = 0.0
+        for c in 1:size(cells, 1)
+            a, b, d = cells[c, 1], cells[c, 2], cells[c, 3]
+            v += 0.5 * ((pts[b, 1] - pts[a, 1]) * (pts[d, 2] - pts[a, 2]) - (pts[d, 1] - pts[a, 1]) * (pts[b, 2] - pts[a, 2]))
+        end
+        return v
+    end
+    for diag in ("backslash", "slash", "alternate"), (nx, ny, ix, jy) in ((8, 4, 2, 2), (5, 3, 1, 2), (4, 4, 3, 1), (6, 3, 5, 2))
+        Lx, Ly = 4.0, 2.0
+        cfg = WCore._check_config(Dict("mesh_type" => "gridsplit", "box_length" => [Lx, Ly], "n_divisions" => [nx, ny],
+                                       "diagonal" => diag, "step" => Dict("length" => ix * Lx / nx, "height" => jy * Ly / ny)))
+        m = WCore._build_gridsplit(IOBuffer(), cfg)
+        tag = "gridsplit step $diag $nx x $ny, step at $ix x $jy"
+        check("$tag: the vertex count", size(m.pts, 1) == (nx + 1) * (ny + 1) - ix * jy)
+        check("$tag: the cell count", size(m.cells, 1) == 2 * (nx * ny - ix * jy))
+        check("$tag: the area is the box area minus the step", abs(volume2(m.pts, m.cells) - (Lx * Ly - ix * Lx / nx * jy * Ly / ny)) < 1e-12)
+        check("$tag: every cell has a positive area", all(c -> volume2(m.pts, m.cells[c:c, :]) > 0, 1:size(m.cells, 1)))
+        check("$tag: the result carries the step", abs(m.step.length - ix * Lx / nx) < 1e-12 && abs(m.step.height - jy * Ly / ny) < 1e-12)
+        # Boundary edges of each marker.
+        cnt = Dict(k => count(==(k), m.edgeMk) for k in 1:6)
+        check("$tag: the boundary edges of each marker", cnt[5] == ix && cnt[6] == jy && cnt[4] == ny - jy && cnt[1] == nx - ix && cnt[2] == ny && cnt[3] == nx)
+        check("$tag: no interior edge has a marker", count(!=(0), m.edgeMk) == 2 * nx + 2 * ny)
+        # The special vertices.
+        function mk_at(x, y)
+            r = findfirst(v -> abs(m.pts[v, 1] - x) < 1e-12 && abs(m.pts[v, 2] - y) < 1e-12, 1:size(m.pts, 1))
+            return Int(m.ptMk[r])
+        end
+        xs, h = ix * Lx / nx, jy * Ly / ny
+        check("$tag: the reentrant corner has the floor marker 5", mk_at(xs, h) == 5)
+        check("$tag: the inlet corner at the step height has the marker 4", mk_at(0.0, h) == 4)
+        check("$tag: the foot of the step face has the bottom marker 1", mk_at(xs, 0.0) == 1)
+        check("$tag: the top left corner has the marker 3", mk_at(0.0, Ly) == 3)
+    end
+    cfgS = WCore._check_config(Dict("mesh_type" => "gridsplit", "box_length" => [1.0, 1.0], "n_divisions" => [4, 3], "diagonal" => "slash",
+                                    "stretching_ratio" => [1.3, 1.5], "stretching_symmetric" => [false, true], "step" => Dict("length" => 0.5, "height" => 0.5)))
+    msg = errmsg(() -> WCore._build_gridsplit(IOBuffer(), cfgS))
+    check("gridsplit step: a stretched grid with a value off the grid gives the grid-line error", msg !== nothing && occursin("nearest grid lines are", msg))
+    px = WCore._axis_positions(IOBuffer(), cfgS, 1, 4, 1.0)
+    py = WCore._axis_positions(IOBuffer(), cfgS, 2, 3, 1.0)
+    cfgS["step"] = (length = px[3], height = py[2])
+    mS = WCore._build_gridsplit(IOBuffer(), cfgS)
+    check("gridsplit step: a stretched grid accepts values on its grid lines", size(mS.cells, 1) == 2 * (12 - 2 * 1) && mS.step == (length = px[3], height = py[2]))
+    check("gridsplit step: the stored step is the exact grid value", mS.step.length === px[3] && mS.step.height === py[2])
+    cfgBad = WCore._check_config(Dict("mesh_type" => "gridsplit", "box_length" => [4.0, 2.0], "n_divisions" => [8, 4], "step" => Dict("length" => 1.01, "height" => 1.0)))
+    msg = errmsg(() -> WCore._build_gridsplit(IOBuffer(), cfgBad))
+    check("gridsplit step: the error names the axis and the value", msg !== nothing && occursin("step length 1.01 is not on a grid line along x", msg))
+    cfgBad["step"] = (length = 1.0, height = 0.9)
+    msg = errmsg(() -> WCore._build_gridsplit(IOBuffer(), cfgBad))
+    check("gridsplit step: the height error names the y axis", msg !== nothing && occursin("step height 0.9 is not on a grid line along y", msg))
+end
+
 # ── Names ────────────────────────────────────────────────────────────────
 
 println("Duplicate names")
@@ -1915,6 +2002,7 @@ if haveIO
         ("h_equilateral", "mesh_type: equilateral\nbox_length: [1.0, 0.866]\nn_divisions: [4, 4]\nperiodic: [false, true]\nhierarchy:\n  levels: 3\n"),
         ("h_triangle_circle", "mesh_type: triangle\nbox_length: [1.0, 1.0]\nperiodic: [true, true]\nmesh_options:\n  mesh_size: 0.25\nobstacles:\n  - shape: circle\n    center: [0.5, 0.5]\n    radius: 0.15\nhierarchy:\n  levels: 3\n"),
         ("h_triangle_rect", "mesh_type: triangle\nbox_length: [2.0, 1.0]\nmesh_options:\n  mesh_size: 0.3\nobstacles:\n  - shape: rectangle\n    center: [0.7, 0.5]\n    half_extents: [0.2, 0.15]\n  - shape: circle\n    center: [1.4, 0.5]\n    radius: 0.2\nhierarchy:\n  levels: 3\n"),
+        ("h_gridsplit_step", "mesh_type: gridsplit\nbox_length: [4.0, 2.0]\nn_divisions: [8, 4]\ndiagonal: alternate\nstep:\n  length: 1.0\n  height: 1.0\nhierarchy:\n  levels: 3\n"),
     ]
     hierLevels = Dict{String,Any}()
     for (name, yamlText) in hierCases2
@@ -2079,13 +2167,13 @@ if haveIO
         script = joinpath(dirname(writerPath), "tools", "hierarchy_multigrid_check.jl")
         if isfile(script) && writerPath == abspath(joinpath(@__DIR__, "writer.jl"))
             outFile = joinpath(hierDir, "mg_check.out")
-            proc = run(pipeline(ignorestatus(`$(Base.julia_cmd()) --project=$(dirname(writerPath)) $script kuhn_box gridsplit_stretched kuhn_periodic triangle_periodic kuhn_fully_periodic`);
+            proc = run(pipeline(ignorestatus(`$(Base.julia_cmd()) --project=$(dirname(writerPath)) $script kuhn_box gridsplit_stretched gridsplit_step kuhn_periodic triangle_periodic kuhn_fully_periodic`);
                                 stdout = outFile, stderr = devnull))
             text = read(outFile, String)
             check("multigrid check: the script exits with code 0", proc.exitcode == 0)
             check("multigrid check: the script reports that all checks passed", occursin("All checks passed.", text))
-            check("multigrid check: the script ran all 5 hierarchies",
-                  all(n -> occursin("== $n:", text), ("kuhn_box", "gridsplit_stretched", "kuhn_periodic", "triangle_periodic", "kuhn_fully_periodic")))
+            check("multigrid check: the script ran all 6 hierarchies",
+                  all(n -> occursin("== $n:", text), ("kuhn_box", "gridsplit_stretched", "gridsplit_step", "kuhn_periodic", "triangle_periodic", "kuhn_fully_periodic")))
             check("multigrid check: the periodic hierarchies were checked for periodic images", count("periodic images", text) >= 3)
         end
     end
