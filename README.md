@@ -52,17 +52,18 @@ and the radius-edge ratio stays within the larger of the old ratio and `radius_e
 In the 10 reference `tetra` meshes the number of cells below 10 degrees fell from 210 to 4. `writer.py` has no such step.
 
 The key `mesh_options: max_dihedral` sets a goal for the largest dihedral angle, in degrees. The value must be 0 (off, the default) or in [90, 180). The flip pass uses the goal in the same way as `min_dihedral`.
-A cell is a candidate when it is below the first goal or above the second goal. A flip must raise the smaller of the two margins of the cells it replaces by at least 1 degree.
+A cell is a candidate when it is below the first goal or above the second goal. The goal for the smallest angle has priority: a flip may not make a cell below it worse to gain on a large angle. Among the other cells, a flip must raise the smaller of the two margins of the cells it replaces by at least 1 degree.
 The smoothing sweeps do not make the largest angle worse. The log gives the number of cells above the goal before and after the flips, and a `[warn]` line when cells stay above it.
-The value 150 is a good choice. Without the goal, the 10 reference `tetra` meshes have 1 to 10 cells above 160 degrees and a largest angle of 161 to 169 degrees. With the goal 150:
+The value 150 is a reasonable choice, but it is not the default. Without the goal, the 10 reference `tetra` meshes have 1 to 10 cells above 160 degrees and a largest angle of 161 to 169 degrees. With the goal 150:
 
 | Result | Without `max_dihedral` | With `max_dihedral: 150` |
 |---|---|---|
 | Meshes with no cell above 160 degrees | 0 of 10 | 9 of 10 |
-| Largest angle | 161.2 to 169.2 degrees | 144.9 to 162.2 degrees |
-| Smallest angle | 7.4 to 12.0 degrees | 8.5 to 21.1 degrees |
+| Largest angle | 161.2 to 169.2 degrees | 144.9 to 162.4 degrees |
+| Smallest angle | 7.4 to 12.0 degrees | 8.2 to 21.1 degrees |
 | Number of cells | reference | 1 to 3 percent fewer |
 
+The goal helps the multigrid solver only a little. For 4 `tetra` hierarchies of 3 levels (a sphere at 2 mesh sizes, a sphere and a box periodic in `y` and `z` at 2 mesh sizes), the V(2,2) factor for 3 levels fell by 0.00 to 0.04 with the goal 150 and by 0.04 to 0.07 with the goal 140. In every case the angles were as good as without the goal or better. This is why the default stays 0: a default must not change the meshes of existing configs for a small gain.
 The mesh `tet_per_ftt` (periodic in `y` and `z`) keeps 2 cells above 160 degrees. A second flip pass after the smoothing sweeps flips at most 2 cells per mesh at the goal 150. The writer does not run this pass.
 
 ## Loading a mesh into kernels (`writer.jl`)

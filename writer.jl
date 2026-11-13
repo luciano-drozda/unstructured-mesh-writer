@@ -69,7 +69,8 @@ Keys in mesh_options:
                         value 0 turns the flips off. Default: 10.0.
     max_dihedral        tetra only. Goal for the largest dihedral angle,
                         in degrees. The flips use it in the same way as
-                        min_dihedral. The value must be 0 or in [90, 180).
+                        min_dihedral. The goal for the smallest angle has
+                        priority. The value must be 0 or in [90, 180).
                         The value 0 turns the goal off. Default: 0.
     smoothing_sweeps    Number of Jacobi smoothing sweeps. Default: 3.
     max_vertices        Safety limit on the vertex count.
@@ -5593,7 +5594,11 @@ end
 
 # Return the score of each cell for the flip pass. Without a goal for the
 # largest angle (goalMaxRad is Inf), the score is the smallest dihedral
-# angle. With a goal, the score is the smaller of two margins. The first
+# angle. With a goal, a cell that is below the goal for the smallest
+# angle has the score (smallest angle - goal - 4). The offset 4 puts every
+# such cell below every other cell, so the goal for the smallest angle
+# has priority. A flip then cannot make a small angle smaller to gain on
+# a large angle. Any other cell has the smaller of two margins. The first
 # margin is the smallest angle minus its goal. The second margin is the
 # goal of the largest angle minus the largest angle. A score below 0
 # means that a goal is not met. When goalRad is 0, only the second margin
@@ -5604,7 +5609,11 @@ function _angle_score3(minD::Vector{Float64}, maxD::Vector{Float64}, goalRad::Fl
     score = zeros(Float64, n)
     for c in 1:n
         hi = goalMaxRad - maxD[c]
-        score[c] = goalRad > 0 ? min(minD[c] - goalRad, hi) : hi
+        if goalRad > 0 && minD[c] < goalRad
+            score[c] = minD[c] - goalRad - 4.0
+        else
+            score[c] = goalRad > 0 ? min(minD[c] - goalRad, hi) : hi
+        end
     end
     return score
 end
@@ -5690,7 +5699,7 @@ function _flip_pass3(pts::Matrix{Float64}, cells::Matrix{Int}, goalRad::Float64,
     end
     cD, cDmax, cvol, cratio = _cell_numbers3(pts, cand)
     # The score of a cell is its smallest dihedral angle. With a goal for
-    # the largest angle, the score is the smaller margin to the two goals.
+    # the largest angle, see _angle_score3.
     scoreOld = _angle_score3(minD, maxD, goalRad, goalMaxRad)
     scoreNew = _angle_score3(cD, cDmax, goalRad, goalMaxRad)
 
@@ -5934,8 +5943,9 @@ function _triangulate_domain3(logBuf::IOBuffer, L::NTuple{3,Float64}, per::NTupl
             count_negative_kernel(meas, nCells, nNeg)
             if nNeg[1] == 0
                 minNew, maxNew, nLowNew, nHighNew = _dihedral_stats3(newPts, cells, reportRad, goalMaxRad)
-                # With a goal for the largest angle, the largest angle may not grow.
-                if minNew >= minDeg && (maxDihedral == 0 || maxNew <= maxDeg)
+                # With a goal for the largest angle, neither the largest angle
+                # nor the number of cells above the goal may grow.
+                if minNew >= minDeg && (maxDihedral == 0 || (maxNew <= maxDeg && nHighNew <= nHigh))
                     pts, newPts = newPts, pts
                     minDeg, maxDeg, nLow, nHigh = minNew, maxNew, nLowNew, nHighNew
                     accepted = true

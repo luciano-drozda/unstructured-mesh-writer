@@ -673,6 +673,8 @@ check("angle score: the score is the smaller of the two margins",
       WCore._angle_score3([0.5, 0.2], [2.0, 2.5], 0.1, 2.4) ≈ [0.4, -0.1])
 check("angle score: with no goal for the smallest angle only the largest angle counts",
       WCore._angle_score3([0.5, 0.2], [2.0, 2.5], 0.0, 2.4) ≈ [0.4, -0.1])
+check("angle score: a cell below the goal for the smallest angle is below every other cell",
+      WCore._angle_score3([0.05, 0.2], [1.0, 2.5], 0.1, 2.4) ≈ [0.05 - 0.1 - 4.0, -0.1])
 check("max_dihedral defaults to 0", WCore._resolve_mesh_options3(Dict("mesh_size" => 0.1)).maxDihedral == 0.0)
 check("max_dihedral accepts 150", WCore._resolve_mesh_options3(Dict("mesh_size" => 0.1, "max_dihedral" => 150.0)).maxDihedral == 150.0)
 check("max_dihedral below 90 is an error", raises(() -> WCore._resolve_mesh_options3(Dict("mesh_size" => 0.1, "max_dihedral" => 80.0))))
@@ -703,6 +705,16 @@ let m = build3((1.0, 1.0, 1.0), (false, false, false), [], 0.2, 0.2, 0.3; sweeps
     m0 = build3((1.0, 1.0, 1.0), (false, false, false), [], 0.2, 0.2, 0.3; sweeps = 0)
     check("max goal alone: flips happen", m[6].flipsDone > 0 && m0[6].flipsDone == 0)
     check("max goal alone: the largest angle falls", m[6].maxDihedralDeg < m0[6].maxDihedralDeg)
+end
+# The goal for the largest angle must not make the smallest angle worse than
+# the flips for the smallest angle alone. The coarse sphere below is a case
+# where an earlier score did so (3.95 instead of 10.19 degrees).
+let L = (1.0, 1.0, 1.0), per = (false, false, false), obs = [(1, 0.5, 0.5, 0.5, 0.2, 0.2, 0.2)]
+    mMin = build3(L, per, obs, 0.5, 0.25, 0.3; sweeps = 0, minDihedral = 10.0)
+    mMax = build3(L, per, obs, 0.5, 0.25, 0.3; sweeps = 0, minDihedral = 10.0, maxDihedral = 150.0)
+    check("max goal priority: the smallest angle is not worse than with the min goal alone",
+          mMax[6].minDihedralDeg >= mMin[6].minDihedralDeg - 1e-9)
+    check("max goal priority: the cells below the min goal do not increase", mMax[6].nBelowGoal <= mMin[6].nBelowGoal)
 end
 # The log reports the goal. The warning appears only when cells stay above it.
 function tetra_log_max(goal)
