@@ -26,7 +26,7 @@
 # Gauss-Seidel sweep, so the factor depends on the mesh quality. It can
 # grow a little with the number of levels on unstructured 3-D meshes.
 # Usage: julia --project=. tools/hierarchy_multigrid_check.jl [NAME ...]
-# NAME is one of the names in CONFIGS. Without a name, the script runs all.
+# NAME is one of the names that _configs() returns. Without a name, the script runs all.
 using SparseArrays, LinearAlgebra, Random
 include(joinpath(@__DIR__, "..", "writer.jl"))
 
@@ -396,8 +396,10 @@ function check_hierarchy(name, yamlPath)
     return failed
 end
 
-# The test hierarchies. Each entry holds a name and the config text.
-const CONFIGS = [
+# Return the test hierarchies. Each entry holds a name and the config text.
+# A function replaces a constant, so that the file has no global value.
+function _configs()
+    return [
     ("triangle_circle", """
 mesh_type: triangle
 box_length: [2.0, 1.0]
@@ -505,13 +507,15 @@ mesh_options:
 hierarchy:
   levels: 4
 """),
-]
+    ]
+end
 
 function run_all()
     dir = mktempdir()
     failed = String[]
-    names = isempty(ARGS) ? [c[1] for c in CONFIGS] : ARGS
-    for (name, text) in CONFIGS
+    configs = _configs()
+    names = isempty(ARGS) ? [c[1] for c in configs] : ARGS
+    for (name, text) in configs
         name in names || continue
         yamlPath = joinpath(dir, name * ".yaml")
         write(yamlPath, text)
