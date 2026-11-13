@@ -1295,8 +1295,10 @@ let
     noKind = zeros(Int, 0); noVal = zeros(Float64, 0)
     mk = zeros(Int32, size(pts, 1))
     WCore.point_markers_2d_domain_kernel(pts, size(pts, 1), 2.0, 2.0, 1e-9, noKind, noVal, noVal, noVal, noVal, 0, 1.0, 1.0, mk)
-    # (0,1) left wins over the floor. (1,1) is the reentrant corner and has the floor marker.
-    # (1,0) is on the bottom. (2,0) is the bottom right corner. (0,2) is on the top.
+    # The vertex (0,1) has the left marker, not the floor marker.
+    # The vertex (1,1) is the reentrant corner. It has the floor marker.
+    # The vertex (1,0) is on the bottom. The vertex (2,0) is a bottom corner.
+    # The vertex (0,2) is on the top.
     check("step markers 2-D: the point rule", Int.(mk) == [4, 5, 5, 6, 1, 1, 2, 2, 3, 0, 0])
     mk0 = zeros(Int32, size(pts, 1))
     WCore.point_markers_2d_domain_kernel(pts, size(pts, 1), 2.0, 2.0, 1e-9, noKind, noVal, noVal, noVal, noVal, 0, 0.0, 0.0, mk0)
@@ -1381,8 +1383,10 @@ let
            0.5 1.0 0.0; 1.0 0.5 1.0; 0.0 2.0 0.5; 1.5 1.5 0.5; 2.0 2.0 1.0]
     mk = zeros(Int32, size(pts, 1))
     WCore.point_markers_3d_step_kernel(pts, size(pts, 1), 2.0, 2.0, 1.0, 1e-9, 1.0, 1.0, mk)
-    # (0,1,.5) xmin wins over the floor. (1,1,.5) is the reentrant corner and has the floor marker.
-    # (1,0,.5) is on ymin. (2,1,.5) is on xmax. (0.5,1,0) is on zmin. (1,.5,1) is on zmax.
+    # The vertex (0,1,.5) has the xmin marker, not the floor marker.
+    # The vertex (1,1,.5) is the reentrant corner. It has the floor marker.
+    # The vertex (1,0,.5) is on ymin. The vertex (2,1,.5) is on xmax.
+    # The vertex (0.5,1,0) is on zmin. The vertex (1,.5,1) is on zmax.
     check("step markers 3-D: the point rule", Int.(mk) == [1, 7, 7, 8, 3, 2, 5, 6, 1, 0, 2])
     mk0 = zeros(Int32, size(pts, 1))
     WCore.point_markers_3d_step_kernel(pts, size(pts, 1), 2.0, 2.0, 1.0, 1e-9, 0.0, 0.0, mk0)
@@ -1473,7 +1477,8 @@ let
     h = zeros(5)
     noKind = zeros(Int, 0); noVal = zeros(Float64, 0)
     WCore.size_field_2d_kernel(px, py, 5, noKind, noVal, noVal, noVal, noVal, 0, 1.5, 0.8, 0.5, 0.1, 0.3, h)
-    # d = distance to the block [0, 1.5] x [0, 0.8]: 0, 0, 0.2 (to the face), 1.5 (to the face), 3.5
+    # The distances to the block [0, 1.5] x [0, 0.8] are 0, 0 and 0.2.
+    # The last two points are at 1.5 and 3.5 from the face.
     check("size field: the distance to the step block", abs(h[1] - 0.1) < 1e-12 && abs(h[2] - 0.1) < 1e-12 &&
           abs(h[3] - (0.1 + 0.3 * 0.2)) < 1e-12 && abs(h[4] - 0.5) < 1e-12 && abs(h[5] - 0.5) < 1e-12)
     h0 = zeros(5)
@@ -1565,6 +1570,146 @@ let
           area_of(mC) < 12.0 - 1.3 * 0.9 - 0.6 * 0.4 && area_of(mC) > 12.0 - 1.3 * 0.9 - 0.6 * 0.4 - pi * 0.25^2)
     check("triangle step: the floor and the face lengths stay exact with obstacles", abs(length_of(mC, 5) - 1.3) < 1e-12 && abs(length_of(mC, 6) - 0.9) < 1e-12)
     check("triangle step: the rectangle obstacle has the exact perimeter", abs(length_of(mC, 10) - 2.0 * (0.6 + 0.4)) < 1e-12)
+end
+
+# ── Step: tetra ──────────────────────────────────────────────────────────
+
+println("Step: tetra")
+# The 3-D size field.
+let
+    px = [0.5, 1.0, 2.1, 3.0]; py = [0.2, 0.8, 1.4, 1.9]; pz = [0.1, 0.3, 0.5, 0.2]
+    h = zeros(4)
+    noKind = zeros(Int, 0); noVal = zeros(Float64, 0)
+    WCore.size_field_3d_kernel(px, py, pz, 4, noKind, noVal, noVal, noVal, noVal, noVal, noVal, 0, 1.5, 0.8, 0.5, 0.1, 0.3, h)
+    # The step block does not depend on z. The distances are 0, 0, hypot(0.6, 0.6) and 1.5.
+    check("size field 3-D: the distance to the step block",
+          abs(h[1] - 0.1) < 1e-12 && abs(h[2] - 0.1) < 1e-12 && abs(h[3] - min(0.5, 0.1 + 0.3 * hypot(0.6, 0.6))) < 1e-12 && abs(h[4] - 0.5) < 1e-12)
+    h0 = zeros(4)
+    WCore.size_field_3d_kernel(px, py, pz, 4, noKind, noVal, noVal, noVal, noVal, noVal, noVal, 0, 0.0, 0.0, 0.5, 0.1, 0.3, h0)
+    check("size field 3-D: a length of 0 switches the step off", all(h0 .== 0.5))
+end
+# The lattice and the facets of the step boundary.
+let
+    qLat = 2.0^(2 - 38)
+    X, Y, Z, ix0, jy0 = WCore._step_lattice3(qLat, (3.0, 1.0, 0.6), 0.8, 0.5, 0.3)
+    check("step lattice: the corner indices point to the step corner", abs(X[ix0 + 1] - 0.8) < 1e-10 && abs(Y[jy0 + 1] - 0.5) < 1e-10)
+    check("step lattice: the coordinates are multiples of the quantum", all(v -> v / qLat == round(v / qLat), vcat(X, Y, Z)))
+    check("step lattice: the arrays start at 0 and end at the box size",
+          X[1] == 0 && Y[1] == 0 && Z[1] == 0 && abs(X[end] - 3.0) < 1e-10 && abs(Y[end] - 1.0) < 1e-10 && abs(Z[end] - 0.6) < 1e-10)
+    check("step lattice: the arrays increase", all(diff(X) .> 0) && all(diff(Y) .> 0) && all(diff(Z) .> 0))
+    check("step lattice: the spacing stays near mesh_size", maximum(diff(X)) <= 0.3 + 1e-9 && maximum(diff(Y)) <= 0.3 + 1e-9 && maximum(diff(Z)) <= 0.3 + 1e-9)
+end
+let
+    function build_step3(L, step, obs, h, hObs; sweeps = 3, minDihedral = 0.0, maxDihedral = 0.0)
+        kinds = Int[o[1] for o in obs]
+        f(i) = Float64[o[i] for o in obs]
+        return WCore._triangulate_domain3(IOBuffer(), L, (false, false, false), kinds, f(2), f(3), f(4), f(5), f(6), f(7),
+                                          h, hObs, 0.3, 2.0, sweeps, 2000000, minDihedral, maxDihedral, step[1], step[2])
+    end
+    function check_step3(name, L, step, obs, mesh; delaunay = false)
+        pts, cells, edges, c2e, ptMk, info = mesh
+        nCells = size(cells, 1); nPts = size(pts, 1)
+        Lq = info.boxSize
+        stepQ = info.step
+        meas = zeros(nCells)
+        WCore.signed_measure_3d_kernel(cells, pts, nCells, meas)
+        check("$name: every cell has a positive volume", all(>(0), meas))
+        table = face_table(cells)
+        check("$name: each face belongs to 1 or 2 cells", all(v -> length(v) in (1, 2), values(table)))
+        bvol = 0.0
+        areas = Dict(k => 0.0 for k in 0:8)
+        for (key, owners) in table
+            length(owners) == 1 || continue
+            c, i = owners[1]
+            f = WCore._face3(i)
+            a = pts[cells[c, f[1]], :]; b = pts[cells[c, f[2]], :]; d = pts[cells[c, f[3]], :]
+            bvol += dot(a, cross(b, d)) / 6.0
+            mk = Int(WCore._boundary_face_marker3(pts, Int32.(ptMk), Lq, key[1], key[2], key[3], stepQ))
+            mk in 0:8 && (areas[mk] += 0.5 * norm(cross(b - a, d - a)))
+        end
+        check("$name: cell volume equals boundary volume", abs(sum(meas) - bvol) < 1e-10 * prod(Lq))
+        check("$name: Euler characteristic is 1 + the number of obstacles", nPts - size(edges, 1) + length(table) - nCells == 1 + length(obs))
+        check("$name: the step is a lattice value near the request", abs(stepQ.length - step[1]) < 1e-9 * Lq[1] && abs(stepQ.height - step[2]) < 1e-9 * Lq[2])
+        vol = Lq[1] * Lq[2] * Lq[3] - stepQ.length * stepQ.height * Lq[3]
+        if isempty(obs)
+            check("$name: the volume is the box volume minus the step", abs(sum(meas) - vol) < 1e-9 * vol)
+        else
+            check("$name: the volume is below the box volume minus the step", sum(meas) < vol)
+        end
+        # The area of each marker. The marker 0 means a face of an obstacle.
+        Lz = Lq[3]
+        want = Dict(1 => (Lq[2] - stepQ.height) * Lz, 2 => Lq[2] * Lz, 3 => (Lq[1] - stepQ.length) * Lz, 4 => Lq[1] * Lz,
+                    5 => Lq[1] * Lq[2] - stepQ.length * stepQ.height, 6 => Lq[1] * Lq[2] - stepQ.length * stepQ.height,
+                    7 => stepQ.length * Lz, 8 => stepQ.height * Lz)
+        check("$name: the boundary area of each box marker and each step marker",
+              all(abs(areas[k] - want[k]) < 1e-9 * want[k] for k in 1:8))
+        # The markers of the vertices follow the coordinate rule.
+        expected = zeros(Int32, nPts)
+        WCore.point_markers_3d_step_kernel(pts, nPts, Lq[1], Lq[2], Lq[3], 1e-8 * maximum(Lq), stepQ.length, stepQ.height, expected)
+        onObs = [Int(ptMk[v]) >= 100 for v in 1:nPts]
+        check("$name: the vertex markers follow the coordinate rule", all(Int(ptMk[v]) == Int(expected[v]) for v in 1:nPts if !onObs[v]))
+        # No vertex lies inside the block.
+        check("$name: no vertex lies inside the step block",
+              all(!(pts[v, 1] < stepQ.length - 1e-9 && pts[v, 2] < stepQ.height - 1e-9) for v in 1:nPts))
+        check("$name: no cell centroid lies inside the step block",
+              all(c -> (cx = sum(pts[cells[c, :], 1]) / 4; cy = sum(pts[cells[c, :], 2]) / 4; !(cx < stepQ.length && cy < stepQ.height)), 1:nCells))
+        if delaunay
+            ok = true
+            for (key, owners) in table
+                length(owners) == 2 || continue
+                (c1, i1), (c2, i2) = owners
+                a, b, d, e = cells[c1, 1], cells[c1, 2], cells[c1, 3], cells[c1, 4]
+                apex = cells[c2, i2]
+                if WCore._insphere(pts[a, :]..., pts[b, :]..., pts[d, :]..., pts[e, :]..., pts[apex, :]...) > 0
+                    ok = false
+                end
+            end
+            check("$name: every interior face is locally Delaunay", ok)
+            check("$name: the radius-edge ratio is within the bound", info.maxRatio <= 2.0 * (1 + 1e-9))
+        end
+        return info
+    end
+    L = (3.0, 1.0, 0.6)
+    mesh = build_step3(L, (0.8, 0.5), [], 0.3, 0.3; sweeps = 0)
+    infoA = check_step3("tetra step plain, no smoothing", L, (0.8, 0.5), [], mesh; delaunay = true)
+    # The step walls get a finer mesh with a small mesh_size_obstacle.
+    fine = build_step3(L, (0.8, 0.5), [], 0.3, 0.12; sweeps = 0)
+    check("tetra step: a small mesh_size_obstacle refines the step walls", size(fine[2], 1) > 1.5 * size(mesh[2], 1))
+    # A sphere downstream of the step, with smoothing and the goal for the largest angle.
+    L2 = (3.0, 1.0, 0.8)
+    obs = [(1, 1.9, 0.6, 0.4, 0.2, 0.2, 0.2)]
+    meshS = build_step3(L2, (0.7, 0.4), obs, 0.35, 0.15; maxDihedral = 150.0)
+    infoS = check_step3("tetra step with a sphere", L2, (0.7, 0.4), obs, meshS)
+    check("tetra step with a sphere: the marker 100 is present", 100 in Set(Int.(meshS[5])))
+    check("tetra step with a sphere: the largest dihedral angle does not exceed the start", infoS.nAboveGoal <= infoS.nAboveStart)
+    check("tetra step with a sphere: the radius-edge ratio is below 3", infoS.maxRatio < 3.0)
+    # A box obstacle downstream.
+    obsB = [(2, 2.0, 0.65, 0.4, 0.15, 0.15, 0.2)]
+    meshB = build_step3(L2, (0.7, 0.4), obsB, 0.35, 0.2)
+    check_step3("tetra step with a box obstacle", L2, (0.7, 0.4), obsB, meshB)
+    # The builder: the result carries the lattice value, and periodic z is refused for now.
+    cfg = WCore._check_config(Dict("mesh_type" => "tetra", "box_length" => [3.0, 1.0, 0.6], "step" => Dict("length" => 0.8, "height" => 0.5),
+                                   "mesh_options" => Dict("mesh_size" => 0.4)))
+    res = redirect_stdout(devnull) do
+        WCore._build_tetra(IOBuffer(), cfg)
+    end
+    check("tetra step: the builder result carries the lattice step", res.step !== nothing && abs(res.step.length - 0.8) < 1e-9 && abs(res.step.height - 0.5) < 1e-9)
+    check("tetra step: the result box size is the lattice box", all(abs.(collect(res.boxSize) .- [3.0, 1.0, 0.6]) .< 1e-9))
+    check("tetra step: periodic z is refused in this version",
+          occursin("periodic false along z", something(errmsg(() -> WCore._check_config(Dict("mesh_type" => "tetra", "box_length" => [3.0, 1.0, 0.6],
+                "periodic" => [false, false, true], "step" => Dict("length" => 0.8, "height" => 0.5), "mesh_options" => Dict("mesh_size" => 0.4)))), "")))
+end
+# The obstacle check knows the 3-D step.
+let
+    box = (6.0, 2.0, 1.0)
+    step = (length = 1.0, height = 0.8)
+    sph(c, r) = [Dict("shape" => "sphere", "center" => c, "radius" => r)]
+    check("step obstacles 3-D: a sphere that overlaps the step block is an error",
+          occursin("overlaps or touches the step", something(errmsg(() -> WCore._validate_obstacles3(IOBuffer(), sph([1.0, 0.8, 0.5], 0.3), box, 0.1, step)), "")))
+    check("step obstacles 3-D: a sphere downstream is valid", !raises(() -> WCore._validate_obstacles3(IOBuffer(), sph([3.0, 1.0, 0.5], 0.3), box, 0.1, step)))
+    buf = IOBuffer()
+    WCore._validate_obstacles3(buf, sph([1.35, 1.1, 0.5], 0.3), box, 0.1, step)
+    check("step obstacles 3-D: a small gap gives a warning", occursin("gap to the step", String(take!(buf))))
 end
 
 # ── Names ────────────────────────────────────────────────────────────────
@@ -2217,6 +2362,7 @@ if haveIO
         ("h_tetra_plain", "mesh_type: tetra\nbox_length: [1.0, 1.0, 1.0]\nmesh_options:\n  mesh_size: 0.5\nhierarchy:\n  levels: 3\n"),
         ("h_tetra_obs", "mesh_type: tetra\nbox_length: [2.0, 1.0, 1.0]\nperiodic: [false, true, true]\nmesh_options:\n  mesh_size: 0.5\n  mesh_size_obstacle: 0.3\nobstacles:\n  - shape: sphere\n    center: [0.7, 0.5, 0.5]\n    radius: 0.2\n  - shape: box\n    center: [1.4, 0.5, 0.5]\n    half_extents: [0.15, 0.2, 0.15]\nhierarchy:\n  levels: 3\n"),
         ("h_kuhn_step", "mesh_type: kuhn\nbox_length: [4.0, 2.0, 1.0]\nn_divisions: [8, 4, 2]\ndiagonal: alternate_layers\nperiodic: [false, false, true]\nstep:\n  length: 1.0\n  height: 1.0\nhierarchy:\n  levels: 3\n"),
+        ("h_tetra_step", "mesh_type: tetra\nbox_length: [2.0, 1.0, 0.5]\nstep:\n  length: 0.6\n  height: 0.5\nmesh_options:\n  mesh_size: 0.5\nhierarchy:\n  levels: 3\n"),
     ]
     for (name, yamlText) in hierCases3
         write(joinpath(hierDir, "$name.yaml"), yamlText)
@@ -2370,13 +2516,13 @@ if haveIO
         script = joinpath(dirname(writerPath), "tools", "hierarchy_multigrid_check.jl")
         if isfile(script) && writerPath == abspath(joinpath(@__DIR__, "writer.jl"))
             outFile = joinpath(hierDir, "mg_check.out")
-            proc = run(pipeline(ignorestatus(`$(Base.julia_cmd()) --project=$(dirname(writerPath)) $script kuhn_box gridsplit_stretched gridsplit_step kuhn_step triangle_step kuhn_periodic triangle_periodic kuhn_fully_periodic`);
+            proc = run(pipeline(ignorestatus(`$(Base.julia_cmd()) --project=$(dirname(writerPath)) $script kuhn_box gridsplit_stretched gridsplit_step kuhn_step triangle_step tetra_step kuhn_periodic triangle_periodic kuhn_fully_periodic`);
                                 stdout = outFile, stderr = devnull))
             text = read(outFile, String)
             check("multigrid check: the script exits with code 0", proc.exitcode == 0)
             check("multigrid check: the script reports that all checks passed", occursin("All checks passed.", text))
-            check("multigrid check: the script ran all 8 hierarchies",
-                  all(n -> occursin("== $n:", text), ("kuhn_box", "gridsplit_stretched", "gridsplit_step", "kuhn_step", "triangle_step", "kuhn_periodic", "triangle_periodic", "kuhn_fully_periodic")))
+            check("multigrid check: the script ran all 9 hierarchies",
+                  all(n -> occursin("== $n:", text), ("kuhn_box", "gridsplit_stretched", "gridsplit_step", "kuhn_step", "triangle_step", "tetra_step", "kuhn_periodic", "triangle_periodic", "kuhn_fully_periodic")))
             check("multigrid check: the periodic hierarchies were checked for periodic images", count("periodic images", text) >= 3)
         end
     end

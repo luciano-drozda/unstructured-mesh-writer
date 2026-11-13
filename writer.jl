@@ -1451,11 +1451,12 @@ end
 # ── 3-D Delaunay kernels ──────────────────────────────────────────────
 
 # size_field_3d_kernel(px, py, pz, n, obsKind, obsCx, obsCy, obsCz,
-#                      obsHx, obsHy, obsHz, nObs, hMax, hObs, grading, h)
+#                      obsHx, obsHy, obsHz, nObs, stepL, stepH,
+#                      hMax, hObs, grading, h)
 #
 # Compute the target size at each query point. The target size is hObs
-# on an obstacle surface. It grows with the distance to the nearest
-# obstacle surface. It never exceeds hMax.
+# on an obstacle surface and on the step. It grows with the distance to
+# the nearest obstacle or step. It never exceeds hMax.
 #
 # px: x coordinate of each query point
 # py: y coordinate of each query point
@@ -1469,11 +1470,13 @@ end
 # obsHy: radius of a sphere, or half the y extent of a box
 # obsHz: radius of a sphere, or half the z extent of a box
 # nObs: number of obstacles
+# stepL: length of the step block along x, or 0 for a domain without step
+# stepH: height of the step block along y
 # hMax: target size far from obstacles
-# hObs: target size on obstacle surfaces
+# hObs: target size on obstacle surfaces and on the step
 # grading: growth of the target size per unit of distance
 # h: length-n output array
-function size_field_3d_kernel(px, py, pz, n, obsKind, obsCx, obsCy, obsCz, obsHx, obsHy, obsHz, nObs, hMax, hObs, grading, h)
+function size_field_3d_kernel(px, py, pz, n, obsKind, obsCx, obsCy, obsCz, obsHx, obsHy, obsHz, nObs, stepL, stepH, hMax, hObs, grading, h)
     for i = 1:n
         x = px[i]
         y = py[i]
@@ -1495,6 +1498,13 @@ function size_field_3d_kernel(px, py, pz, n, obsKind, obsCx, obsCy, obsCz, obsHx
                 dk = abs(sqrt(ox * ox + oy * oy + oz * oz) + min(max(max(qx, qy), qz), 0.0))
             end
             d = min(d, dk)
+        end
+        # The step block is [0, stepL] x [0, stepH] x all z. A query point
+        # lies outside it, so the distance uses the clipped offsets.
+        if stepL > 0.0
+            sx = max(x - stepL, 0.0)
+            sy = max(y - stepH, 0.0)
+            d = min(d, sqrt(sx * sx + sy * sy))
         end
         h[i] = min(hMax, hObs + grading * d)
     end
@@ -3907,6 +3917,8 @@ function _new_mesher3(capV::Int, capC::Int, capS::Int, capSF::Int, maxVertices::
         nObs = Ref{Int}(0),
         hMax = Ref{Float64}(1.0),
         hObs = Ref{Float64}(1.0),
+        stepL = Ref{Float64}(0.0),
+        stepH = Ref{Float64}(0.0),
         grading = Ref{Float64}(0.0),
         ratioBound = Ref{Float64}(2.0),
         doBad = Ref{Bool}(false),
@@ -4902,6 +4914,88 @@ function _build_box_plc3!(M::NamedTuple, lo::NTuple{3,Float64}, delta::NTuple{3,
     return hi
 end
 
+# Return the number of cells and the cell width of one piece of a lattice
+# axis. The piece has the length len. The width is a multiple of qLat, so
+# that every lattice coordinate is exact.
+function _lattice_piece3(len::Float64, hMax::Float64, qLat::Float64)
+    n = max(1, ceil(Int, len / hMax))
+    return n, round(len / n / qLat) * qLat
+end
+
+# Build the lattice coordinates of a box with a step. Each axis has the
+# coordinate array X, Y or Z. The step corner lies on the lattice. Return
+# the three arrays and the lattice indices ix0 and jy0 of the corner. The
+# box size changes by less than 1e-11 of its length.
+function _step_lattice3(qLat::Float64, L::NTuple{3,Float64}, xs::Float64, h::Float64, hMax::Float64)
+    nx1, dx1 = _lattice_piece3(xs, hMax, qLat)
+    xsq = nx1 * dx1
+    nx2, dx2 = _lattice_piece3(L[1] - xsq, hMax, qLat)
+    ny1, dy1 = _lattice_piece3(h, hMax, qLat)
+    hq = ny1 * dy1
+    ny2, dy2 = _lattice_piece3(L[2] - hq, hMax, qLat)
+    nz, dz = _lattice_piece3(L[3], hMax, qLat)
+    X = vcat([i * dx1 for i in 0:nx1], [xsq + k * dx2 for k in 1:nx2])
+    Y = vcat([j * dy1 for j in 0:ny1], [hq + k * dy2 for k in 1:ny2])
+    Z = [k * dz for k in 0:nz]
+    return X, Y, Z, nx1, ny1
+end
+
+# Build the vertices, the facets, and the segments of a box with a step.
+# The domain is the box minus the block [0, xs] x [0, h] x all z. The
+# lattice has the coordinates X, Y and Z. The corner of the step has the
+# lattice indices ix0 and jy0. The boundary has 10 rectangular facets. The
+# front and the back each have 2 facets, because an L shape is not
+# convex. The labels are 1 to 6 for the box sides, 7 for the step floor
+# and 8 for the step face. A vertex gets the lowest label of the facets
+# that it lies on. The function does not insert the vertices into the
+# 3-D triangulation.
+function _build_step_plc3!(M::NamedTuple, X::Vector{Float64}, Y::Vector{Float64}, Z::Vector{Float64}, ix0::Int, jy0::Int)
+    nn = (length(X) - 1, length(Y) - 1, length(Z) - 1)
+    ax = (X, Y, Z)
+    NX, NY, NZ = nn
+    # One facet: the normal axis a, its lattice index ia, the ranges b0:b1
+    # and c0:c1 along the two other axes, and the label.
+    facets = [(1, 0, jy0, NY, 0, NZ, 1),       # xmin, above the step
+              (1, NX, 0, NY, 0, NZ, 2),        # xmax
+              (2, 0, ix0, NX, 0, NZ, 3),       # ymin, behind the step
+              (2, NY, 0, NX, 0, NZ, 4),        # ymax
+              (3, 0, ix0, NX, 0, NY, 5),       # zmin, rectangle behind the step
+              (3, 0, 0, ix0, jy0, NY, 5),      # zmin, rectangle above the step
+              (3, NZ, ix0, NX, 0, NY, 6),      # zmax, rectangle behind the step
+              (3, NZ, 0, ix0, jy0, NY, 6),     # zmax, rectangle above the step
+              (2, jy0, 0, ix0, 0, NZ, 7),      # step floor
+              (1, ix0, 0, jy0, 0, NZ, 8)]      # step face
+    function lattice_index(a::Int, ia::Int, ib::Int, ic::Int)
+        b, c = _plane_axes(a)
+        idx = [0, 0, 0]
+        idx[a] = ia; idx[b] = ib; idx[c] = ic
+        return (idx[1], idx[2], idx[3])
+    end
+    # The label of a lattice point is the lowest label of its facets.
+    label = Dict{NTuple{3,Int},Int}()
+    for (a, ia, b0, b1, c0, c1, lab) in facets
+        for ic in c0:c1, ib in b0:b1
+            key = lattice_index(a, ia, ib, ic)
+            label[key] = min(get(label, key, typemax(Int)), lab)
+        end
+    end
+    lattice = Dict{NTuple{3,Int},Int}()
+    for key in sort(collect(keys(label)))
+        lattice[key] = _add_vertex3!(M, X[key[1] + 1], Y[key[2] + 1], Z[key[3] + 1], label[key], 0)
+    end
+    for (a, ia, b0, b1, c0, c1, lab) in facets
+        fid = _add_facet3!(M, lab, a)
+        tris = NTuple{3,Int}[]
+        vid(ib, ic) = lattice[lattice_index(a, ia, ib, ic)]
+        for jc in c0:c1 - 1, ib in b0:b1 - 1
+            push!(tris, (vid(ib, jc), vid(ib + 1, jc), vid(ib + 1, jc + 1)))
+            push!(tris, (vid(ib, jc), vid(ib + 1, jc + 1), vid(ib, jc + 1)))
+        end
+        _facet_build3!(M, fid, tris)
+    end
+    return nothing
+end
+
 # Build an icosphere with the given number of subdivisions. Return the
 # direction vectors of the vertices (n-by-3) and the triangles.
 function _icosphere3(level::Int)
@@ -5094,7 +5188,7 @@ end
 function _bad_cells3!(M::NamedTuple, n::Int, push::Bool)
     cell_circumcenter_3d_kernel(M.cellV[], M.vx, M.vy, M.vz, M.wCell, n, M.ccx, M.ccy, M.ccz, M.ccR)
     size_field_3d_kernel(M.ccx, M.ccy, M.ccz, n, M.obsKind[], M.obsCx[], M.obsCy[], M.obsCz[],
-                         M.obsHx[], M.obsHy[], M.obsHz[], M.nObs[], M.hMax[], M.hObs[], M.grading[], M.hAt)
+                         M.obsHx[], M.obsHy[], M.obsHz[], M.nObs[], M.stepL[], M.stepH[], M.hMax[], M.hObs[], M.grading[], M.hAt)
     cell_quality_3d_kernel(M.cellV[], M.vx, M.vy, M.vz, M.wCell, n, M.ccR, M.hAt, M.ratio, M.sizeRatio)
     nBad = 0
     for k in 1:n
@@ -5565,7 +5659,7 @@ end
 # Check each obstacle record. Raise an error for a bad field, for an
 # obstacle that crosses or touches the box, and for two obstacles whose
 # bounding boxes overlap. Warn when a gap is smaller than hObs.
-function _validate_obstacles3(logBuf::IOBuffer, obstacles, box::Tuple, hObs::Float64)
+function _validate_obstacles3(logBuf::IOBuffer, obstacles, box::Tuple, hObs::Float64, step = nothing)
     isempty(obstacles) && return
     lo = Vector{Vector{Float64}}()
     hi = Vector{Vector{Float64}}()
@@ -5604,6 +5698,18 @@ function _validate_obstacles3(logBuf::IOBuffer, obstacles, box::Tuple, hObs::Flo
             error("obstacles $(i-1) and $(j-1): the bounding boxes overlap")
         elseif separation < hObs
             _log(logBuf, "  [warn] obstacles $(i-1) and $(j-1): the gap is smaller than mesh_size_obstacle")
+        end
+    end
+    # The step block [0, length] x [0, height] x all z is one more bounding
+    # box. It spans the full width, so only x and y can separate it.
+    if step !== nothing
+        for i in 1:n
+            separation = max(lo[i][1] - step.length, lo[i][2] - step.height)
+            if separation <= 0
+                error("obstacle $(i-1): the bounding box overlaps or touches the step")
+            elseif separation < hObs
+                _log(logBuf, "  [warn] obstacle $(i-1): the gap to the step is smaller than mesh_size_obstacle")
+            end
         end
     end
 end
@@ -5986,14 +6092,18 @@ function _triangulate_domain3(logBuf::IOBuffer, L::NTuple{3,Float64}, per::NTupl
                               obsKind::Vector{Int}, obsCx::Vector{Float64}, obsCy::Vector{Float64}, obsCz::Vector{Float64},
                               obsHx::Vector{Float64}, obsHy::Vector{Float64}, obsHz::Vector{Float64},
                               hMax::Float64, hObs::Float64, grading::Float64, ratioBound::Float64,
-                              sweeps::Int, maxVertices::Int, minDihedral::Float64 = 0.0, maxDihedral::Float64 = 0.0)
+                              sweeps::Int, maxVertices::Int, minDihedral::Float64 = 0.0, maxDihedral::Float64 = 0.0,
+                              stepL::Float64 = 0.0, stepH::Float64 = 0.0)
     nObs = length(obsKind)
-    hObsUsed = nObs == 0 ? hMax : hObs
+    hasStep = stepL > 0.0
+    hasStep && any(per) && error("internal error: a step with a periodic direction is not available yet")
+    hObsUsed = (nObs == 0 && !hasStep) ? hMax : hObs
     M = _new_mesher3(4096, 16384, 1024, 1024, maxVertices)
     M.obsKind[] = obsKind; M.obsCx[] = obsCx; M.obsCy[] = obsCy; M.obsCz[] = obsCz
     M.obsHx[] = obsHx; M.obsHy[] = obsHy; M.obsHz[] = obsHz
     M.nObs[] = nObs
     M.hMax[] = hMax; M.hObs[] = hObsUsed; M.grading[] = grading; M.ratioBound[] = ratioBound
+    M.stepL[] = stepL; M.stepH[] = stepH
     # The lattice quantum and the fine quantum are powers of two.
     e = ceil(Int, log2(max(L[1], L[2], L[3])))
     qLat = 2.0^(e - 38)
@@ -6004,8 +6114,17 @@ function _triangulate_domain3(logBuf::IOBuffer, L::NTuple{3,Float64}, per::NTupl
     nBox = (max(1, ceil(Int, L[1] / hMax)), max(1, ceil(Int, L[2] / hMax)), max(1, ceil(Int, L[3] / hMax)))
     dBox = (round(L[1] / nBox[1] / qLat) * qLat, round(L[2] / nBox[2] / qLat) * qLat, round(L[3] / nBox[3] / qLat) * qLat)
     Lq = (nBox[1] * dBox[1], nBox[2] * dBox[2], nBox[3] * dBox[3])
-    c1 = _start_bounding_tetra3!(M, 0.0, 0.0, 0.0, Lq[1], Lq[2], Lq[3])
-    _build_box_plc3!(M, (0.0, 0.0, 0.0), dBox, nBox, (1, 2, 3, 4, 5, 6))
+    stepOut = nothing
+    if hasStep
+        X, Y, Z, ix0, jy0 = _step_lattice3(qLat, L, stepL, stepH, hMax)
+        Lq = (X[end], Y[end], Z[end])
+        stepOut = (length = X[ix0 + 1], height = Y[jy0 + 1])
+        c1 = _start_bounding_tetra3!(M, 0.0, 0.0, 0.0, Lq[1], Lq[2], Lq[3])
+        _build_step_plc3!(M, X, Y, Z, ix0, jy0)
+    else
+        c1 = _start_bounding_tetra3!(M, 0.0, 0.0, 0.0, Lq[1], Lq[2], Lq[3])
+        _build_box_plc3!(M, (0.0, 0.0, 0.0), dBox, nBox, (1, 2, 3, 4, 5, 6))
+    end
     for i in 1:nObs
         label = 100 + (i - 1)
         if obsKind[i] == 1
@@ -6021,7 +6140,7 @@ function _triangulate_domain3(logBuf::IOBuffer, L::NTuple{3,Float64}, per::NTupl
             _build_box_plc3!(M, lo, dd, nn, (label, label, label, label, label, label))
         end
     end
-    _setup_periodic3!(M, (0.0, 0.0, 0.0), Lq, per)
+    hasStep || _setup_periodic3!(M, (0.0, 0.0, 0.0), Lq, per)
 
     # ---- Insert the input vertices.
     start = c1
@@ -6155,7 +6274,7 @@ function _triangulate_domain3(logBuf::IOBuffer, L::NTuple{3,Float64}, per::NTupl
             maxDihedralDeg = maxDeg, nBelowGoal = nLow, nBelowStart = nBelowStart,
             nAboveGoal = nHigh, nAboveStart = nAboveStart,
             goalDeg = rad2deg(reportRad), flipsDone = flipsDone, maxRatio = maxRatio,
-            sweepsDone = sweepsDone, exactShare = exactShare, boxSize = Lq)
+            sweepsDone = sweepsDone, exactShare = exactShare, boxSize = Lq, step = stepOut)
     return pts, cells, edges, c2e, labels, info
 end
 
@@ -6581,8 +6700,9 @@ function _build_tetra(logBuf::IOBuffer, cfg::Dict)
     per = cfg["periodic"]
     obstacles = cfg["obstacles"]
     opts = cfg["mesh_options"]
-    hObs = isempty(obstacles) ? opts.meshSize : opts.meshSizeObstacle
-    _validate_obstacles3(logBuf, obstacles, L, hObs)
+    step = cfg["step"]
+    hObs = (isempty(obstacles) && step === nothing) ? opts.meshSize : opts.meshSizeObstacle
+    _validate_obstacles3(logBuf, obstacles, L, hObs, step)
 
     nObs = length(obstacles)
     obsKind = zeros(Int, nObs)
@@ -6606,7 +6726,8 @@ function _build_tetra(logBuf::IOBuffer, cfg::Dict)
     pts, cells, edges, c2e, ptMk, info = _triangulate_domain3(logBuf,
         L, per, obsKind, obsCx, obsCy, obsCz, obsHx, obsHy, obsHz,
         opts.meshSize, hObs, opts.grading, opts.radiusEdgeBound,
-        opts.smoothingSweeps, opts.maxVertices, opts.minDihedral, opts.maxDihedral)
+        opts.smoothingSweeps, opts.maxVertices, opts.minDihedral, opts.maxDihedral,
+        step === nothing ? 0.0 : step.length, step === nothing ? 0.0 : step.height)
     _log(logBuf, "  tetra: $(info.nVertices) vertices, $(info.nCells) cells")
     _log(logBuf, "  dihedral angles: smallest $(round(info.minDihedralDeg, digits = 2)), largest $(round(info.maxDihedralDeg, digits = 2)) degrees")
     _log(logBuf, "  cells with a dihedral angle below $(info.goalDeg) degrees: $(info.nBelowStart) before the flips, $(info.nBelowGoal) at the end ($(info.flipsDone) flips)")
@@ -6623,7 +6744,7 @@ function _build_tetra(logBuf::IOBuffer, cfg::Dict)
     _log(logBuf, "  smoothing sweeps kept: $(info.sweepsDone) of $(opts.smoothingSweeps)")
     _log(logBuf, "  exact insphere calls: $(round(100 * info.exactShare, digits = 1)) percent")
     return _builder_result(pts, cells, ptMk, nothing, edges, c2e, obstacleMeta,
-                           info.boxSize, info, :none, ())
+                           info.boxSize, info, :none, (), info.step)
 end
 
 # Call the builder of the mesh type in a checked config. The call goes
@@ -6910,7 +7031,7 @@ end
 
 # Return the mesh types that accept the key step.
 function _step_types()
-    return ("gridsplit", "kuhn", "triangle")
+    return ("gridsplit", "kuhn", "triangle", "tetra")
 end
 
 # Check the config value of the key step. Return nothing when the key is
@@ -7050,6 +7171,7 @@ function _check_config(cfg)
         mt == "equilateral" && error("'step' is not valid for mesh_type='equilateral'. The rows of this mesh are offset, so a step edge cannot follow them.")
         (cfg["periodic"][1] || cfg["periodic"][2]) && error("'step' needs periodic false along x and y. The inlet and the outlet have different heights.")
         mt in _step_types() || error("'step' is not available for mesh_type='$mt' yet.")
+        mt == "tetra" && cfg["periodic"][3] && error("'step' with mesh_type='tetra' needs periodic false along z in this version.")
     end
     cfg["step"] = step
     cfg["hierarchy"] = _resolve_hierarchy_options(get(cfg, "hierarchy", nothing))
