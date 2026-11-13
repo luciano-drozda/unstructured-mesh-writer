@@ -172,6 +172,27 @@ No flip and no smoothing run on a fine level, because either one would break the
 - **Radius-edge ratio.** It grows at level 1 (for example from 1.12 to 2.44 on the `tetra` box) and then stays constant in these runs. The option `radius_edge_bound` applies to level 0 only.
 - **Slivers.** A sliver of level 0 stays on every level. The flip pass (`min_dihedral`) runs on level 0, before the refinement.
 
+### Check a hierarchy with a multigrid solver
+
+The script `tools/hierarchy_multigrid_check.jl` reads the level files with `load_hierarchy`, like a solver does, and uses only the stored arrays. It makes three checks:
+
+1. The prolongation matrix `P` copies every linear function from level `k` to level `k+1`. The script builds `P` from `fine_vertex_parents`: each fine vertex gets the weight 0.5 from each of its two parents.
+2. The Galerkin product `P' * A_fine * P` equals the stiffness matrix `A_coarse` of the Laplace operator that the script assembles on the coarse mesh. This is true only when the coarse space lies inside the fine space, so one number tests the nesting, the vertex order and the cell order.
+3. A V(2,2)-cycle with Gauss-Seidel smoothing and a direct solve on level 0 solves a Poisson problem with zero values at the vertices that have a boundary marker.
+
+Measured here (`julia --project=. tools/hierarchy_multigrid_check.jl`): the errors of checks 1 and 2 are between 1e-16 and 6e-15 on all levels of the 4 test hierarchies (2-D with a circle, 2-D stretched grid, `kuhn` box, `tetra` with a sphere).
+The convergence factor of the V-cycle, for a hierarchy with level 0 and 1 to 4 finer levels:
+
+| Hierarchy | Factor, 1 finer level | 2 | 3 | 4 |
+|---|---|---|---|---|
+| `triangle` with a circle | 0.08 | 0.11 | 0.12 | 0.15 |
+| `gridsplit` stretched (1.3 and 1.5) | 0.13 | 0.25 | 0.29 | 0.34 |
+| `kuhn` box | 0.06 | 0.16 | 0.21 | |
+| `tetra` with a sphere (`max_dihedral: 150`) | 0.34 | 0.44 | 0.54 | |
+
+The factor grows a little with the number of levels, and it grows most on the `tetra` mesh. The cause is the smoother and the quality of the coarse mesh, not the hierarchy: check 2 shows that the coarse matrices are exact. A stronger smoother or a better coarse mesh lowers the factor.
+A hierarchy with a wrong vertex order gives a failure in check 1 and check 2. The script ends with a code 1 when a check fails or when a factor is 0.7 or more. The test suite runs the script on 2 of the hierarchies.
+
 ### Choosing the coarsest mesh
 
 - **Size.** A direct solver should be able to handle the coarsest mesh. COMSOL uses this rule. PETSc GAMG gives 1000 equations as an example limit. The best number depends on your solver.

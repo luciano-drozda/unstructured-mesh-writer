@@ -1989,6 +1989,22 @@ if haveIO
         end
     end
 
+    # The script tools/hierarchy_multigrid_check.jl reads the written files
+    # like a solver. It checks the prolongation, the Galerkin product and a
+    # V-cycle. The test runs it on a 2-D and a 3-D hierarchy.
+    let
+        script = joinpath(dirname(writerPath), "tools", "hierarchy_multigrid_check.jl")
+        if isfile(script) && writerPath == abspath(joinpath(@__DIR__, "writer.jl"))
+            outFile = joinpath(hierDir, "mg_check.out")
+            proc = run(pipeline(ignorestatus(`$(Base.julia_cmd()) --project=$(dirname(writerPath)) $script kuhn_box gridsplit_stretched`);
+                                stdout = outFile, stderr = devnull))
+            text = read(outFile, String)
+            check("multigrid check: the script exits with code 0", proc.exitcode == 0)
+            check("multigrid check: the script reports that all checks passed", occursin("All checks passed.", text))
+            check("multigrid check: the script ran both hierarchies", occursin("== kuhn_box", text) && occursin("== gridsplit_stretched", text))
+        end
+    end
+
     # Regression against the reference outputs of the old files
     # (section 12.2.1 of the plan), when the folder is given.
     refDir = get(ENV, "WRITER_REF_DIR", "")
