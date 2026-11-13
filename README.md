@@ -294,7 +294,7 @@ A hierarchy works with a step on all four mesh types. The refinement copies the 
 ### Quality
 
 - `triangle`: the smallest angle meets `min_angle` (20 degrees by default). The test meshes have 25 to 31 degrees.
-- `tetra`: the flips work as in a box. A sweep over 14 random steps, with and without periodic z, gave no failure. With the default `min_dihedral` of 10, 11 of the 14 meshes keep the smallest dihedral angle above 10 degrees. The other 3 have 4.9 to 8.6 degrees. The largest angle was between 157 and 172 degrees. `max_dihedral: 150` lowers it.
+- `tetra`: the flips work as in a box. A sweep over 60 random steps, with and without periodic z, gave no failure. With the default `min_dihedral` of 10, 53 of the 60 meshes keep the smallest dihedral angle above 10 degrees. The other 7 have 3.5 to 9.9 degrees. Box meshes from the same draws gave 3 meshes below 10 degrees and none below 8. Of the 8 cells below 10 degrees in the step meshes, 5 touch the step walls or lie within one mesh size of the reentrant edge. The largest angle was between 157 and 173 degrees. `max_dihedral: 150` lowers it.
 
 ### Gallery of steps
 
